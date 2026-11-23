@@ -1,3 +1,5 @@
+Maintainers re-apply your change with you as the author. See [CONTRIBUTING](../CONTRIBUTING.md).
+
 ## What and why
 
 <!-- One change. What it does, and why it is needed. -->

@@ -7,6 +7,7 @@ import { ledgerNoteMatcher, withoutLedgerMetadata } from '../../retrieval/ledger
 import { withReplacements } from '../../memorymap/replacements.js';
 import { withHitDates } from '../hitDates.js';
 import { withFactHits } from '../factsLane.js';
+import { recallAgenticGrepEnabled, secondLook, appendNew } from '../searchTextIterate.js';
 import { markStoredHit, SearchHit, toolError, searchResult } from './shared.js';
 import type { ToolContext } from './setup.js';
 
@@ -29,15 +30,25 @@ export function registerSearchTextTool(ctx: ToolContext): void {
   }, async (args, extra) => {
     try {
       const topK = args.top_k ?? 20;
+      const iterate = <F extends { ok: boolean; results: unknown[] }>(found: F): F => {
+        const direct = found.ok ? found.results as SearchHit[] : [];
+        const look = direct.length > 0 && direct.length < topK ? secondLook(args.query, direct) : null;
+        if (!look) return found;
+        const more = engineSearchText(db, config.memoryDir, look.query, topK, args.scope, false, config.ledgerRelPath, undefined, look.match, true);
+        return more.ok ? { ...found, results: appendNew(direct, more.results as SearchHit[], topK) as unknown[] } : found;
+      };
       const exact = engineSearchText(db, config.memoryDir, args.query, topK, args.scope, false, config.ledgerRelPath);
       // H12 (default on; RENOR_SEARCH_TEXT_FALLBACK=0 restores exact-only): when the exact phrase finds nothing, the words are searched with OR over the stemmed index (log/logging) and
       // the reply says so (`fallback`). A reply that has hits is never changed. Pre-registered: data/renor-goal-better-temporal-2/prereg/H11b-H18-H12.md.
-      const body = searchTextFallbackEnabled() && exact.ok && (exact.results as unknown[]).length === 0
+      const first = searchTextFallbackEnabled() && exact.ok && (exact.results as unknown[]).length === 0
         ? (() => {
           const any = engineSearchText(db, config.memoryDir, args.query, topK, args.scope, false, config.ledgerRelPath, undefined, keywordOrMatch(args.query), true);
           return any.ok && (any.results as unknown[]).length > 0 ? { ...any, fallback: 'any-word' } : exact;
         })()
         : exact;
+      // RENOR_RECALL_AGENTIC_GREP (off by default, issue #2072; unset leaves the reply byte for byte): one more search with the
+      // distinctive words of the best hits, appended after every direct hit.
+      const body = recallAgenticGrepEnabled() ? iterate(first) : first;
       if (body.ok) markAuthority(db, body.results as SearchHit[], ledgerNoteMatcher(config));
       if (body.ok) markFactHits(db, body.results as SearchHit[], readerOf(extra), ledgerNoteMatcher(config));
       const result = body.ok

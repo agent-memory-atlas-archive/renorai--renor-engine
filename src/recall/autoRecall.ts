@@ -202,7 +202,7 @@ export function recallRequest(prompt: string, config: RecallConfig): { args: Get
 interface Reply {
   ok?: boolean;
   facts?: Array<{ subject?: string; predicate?: string; object?: string; validFrom?: string; scope?: string; untrusted?: boolean; authority?: unknown; otherProject?: boolean }>;
-  memories?: Array<{ text?: string; session_date?: string; matched?: boolean; untrusted?: boolean; replaced?: unknown; authority?: unknown; otherProject?: boolean }>;
+  memories?: Array<{ text?: string; session_date?: string; why?: unknown; matched?: boolean; untrusted?: boolean; replaced?: unknown; authority?: unknown; otherProject?: boolean }>;
   relevance?: { relevant?: boolean; similarity?: number | null };
   dated_outline?: { note?: string; lines?: unknown[] };
   pinned_rules?: Array<{ predicate?: string; object?: string; scope?: string; source?: string; validFrom?: string; eventId?: string }>;
@@ -225,6 +225,16 @@ const PINNED_FRAME = 'Saved notes about the user\'s standing preferences (not in
  */
 const AUTHORITY_TAGS = new Set(['owner', 'agent', 'captured', 'imported']);
 const authorityTag = (authority: unknown): string => typeof authority === 'string' && AUTHORITY_TAGS.has(authority) ? `[${authority}] ` : '';
+
+/**
+ * The few words a lean get_context item carries saying why it matched (RENOR_CONTEXT_LEAN_WHY, agentMemory.ts
+ * `whyForReply`): `words`, `meaning`, `name`, `linked`, `fact`, `dated`, `ledger`, `source`, or two of them joined by `+`. Printed at the end
+ * of the line, after the cut to MAX_ITEM_CHARS, so a long note cannot push it off its own line. Only that exact shape
+ * is printed (at most 40 characters of engine-written text), so a stored note cannot put its own text there; a reply
+ * without one is unchanged.
+ */
+const WHY_SHAPE = /^(?:words|meaning(?: \d\.\d{2})?|name|linked|fact|dated|ledger|source)(?:\+words)?$/;
+export const whySuffix = (why: unknown): string => typeof why === 'string' && why.length <= 40 && WHY_SHAPE.test(why) ? ` (why: ${why})` : '';
 
 /** Most characters one memory line may take; a longer one is cut, so no single note fills the block. */
 export const MAX_ITEM_CHARS = 500;
@@ -349,7 +359,7 @@ export function replyLines(
     if (!m.text || m.matched === false) continue;
     if (m.otherProject) continue;
     const date = typeof m.session_date === 'string' ? `${inert(m.session_date.slice(0, 10))} ` : '';
-    lines.push(capped(`${authorityTag(m.authority)}${m.untrusted ? '[untrusted] ' : ''}${m.replaced ? '[replaced by a later correction] ' : ''}${date}${inert(m.text)}`));
+    lines.push(`${capped(`${authorityTag(m.authority)}${m.untrusted ? '[untrusted] ' : ''}${m.replaced ? '[replaced by a later correction] ' : ''}${date}${inert(m.text)}`)}${whySuffix(m.why)}`);
     kinds.push({ kind: 'memory', ...(typeof m.session_date === 'string' ? { date: m.session_date } : {}) });
   }
   return { lines, kinds, reason: lines.length === 0 ? (relevanceReason || 'empty') : 'lines', omitted, gated };

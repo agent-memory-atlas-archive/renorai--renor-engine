@@ -83,7 +83,7 @@ describe('pruneOrphanOutputs', () => {
 
     const removed = pruneOrphanOutputs(path.join(root, 'tsconfig.json'));
 
-    expect(removed.map((f: string) => path.relative(path.join(root, 'dist'), f)).sort()).toEqual([...drop].sort());
+    expect(removed.map((f: string) => path.relative(path.join(root, 'dist'), f).split(path.sep).join('/')).sort()).toEqual([...drop].sort());
     for (const f of keep) expect(fs.existsSync(path.join(root, 'dist', f))).toBe(true);
     for (const f of drop) expect(fs.existsSync(path.join(root, 'dist', f))).toBe(false);
     expect(fs.existsSync(path.join(root, 'stray.js'))).toBe(true);
@@ -125,7 +125,7 @@ describe('missingOutputs', () => {
     // listing it would force a full rebuild on every run, which is what #532 measured in a gate.
     fs.writeFileSync(path.join(root, 'src/thing.cts'), 'export const t = 3;\n');
     fs.writeFileSync(path.join(root, 'src/types.d.cts'), 'export declare const d: number;\n');
-    const rel = (files: string[]) => files.map((f) => path.relative(path.join(root, 'dist'), f)).sort();
+    const rel = (files: string[]) => files.map((f) => path.relative(path.join(root, 'dist'), f).split(path.sep).join('/')).sort();
 
     expect(rel(missingOutputs(config))).toEqual(['a.js', 'sub/b.js', 'thing.cjs']);
 

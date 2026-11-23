@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import { Command } from "commander";
 import { loadConfig } from "./config";
 import { openIndexDb } from "./db/client";
@@ -41,6 +42,7 @@ import { engineStatus, statusLines, StatusError } from "./status.js";
 import { runDoctor, doctorMarkdown } from "./doctor.js";
 import { lookupLatestVersion } from "./latestVersion.js";
 import { backupEnabled, BackupError, createBackup, defaultBackupName, restoreBackup, verifyBackup } from "./backup.js";
+import { applyLocalObserveSwitch, observeOnce, observationCount, purgeAllObservations, OBSERVE_STDIN_MAX_BYTES } from "./mvp/observeLocal.js";
 import { APPS, isApp, installRule, removeRule, mcpEntry, rulePath } from "./connect.js";
 
 /**
@@ -206,6 +208,16 @@ program
   .command("index")
   .description("Index full vault")
   .action(async () => {
+    // A typo in VAULT_PATH used to be silently created by openIndexDb's
+    // mkdirSync of the db parent, then reported as a healthy empty index. Check
+    // the folder before setup() opens the db so the mistake is loud, not a
+    // "Done. 0/0" that a person or a script could trust. An existing empty
+    // folder is still a valid (empty) vault, so only a missing one is refused.
+    const vaultPath = loadConfig().vaultPath;
+    if (!fs.existsSync(vaultPath)) {
+      console.error('Memory folder does not exist (check VAULT_PATH). Nothing to index.');
+      process.exit(1);
+    }
     const { config, db, provider, vectorIndex, factExtractor, numericFactExtractor, eventExtractor, preferenceExtractor } = await setup();
     refuseArmedWithoutProvider(db, armedWithoutProvider({
       numericFactExtractor, eventExtractor, preferenceExtractor,
@@ -361,8 +373,15 @@ program
         console.log(composed.text);
         console.log("");
       }
+      if (hits.length === 0) {
+        // #14: zero hits used to print nothing and exit 0, so a person could not tell "no match" from "broken".
+        console.log(`No notes matched "${query}"`);
+      }
       hits.forEach((h) => {
-        console.log(`\n[${h.score.toFixed(3)}] ${clientPath(config.vaultPath, h.notePath)} (${h.reason})`);
+        // With no embedding provider the hits came from the keyword lane, so the reason's `semantic` base would lie
+        // about how they were found (#14). The stored reason is untouched: `--json` is a frozen contract.
+        const reason = provider ? h.reason : h.reason.replace(/^semantic/, 'keyword');
+        console.log(`\n[${h.score.toFixed(3)}] ${clientPath(config.vaultPath, h.notePath)} (${reason})`);
         console.log(h.text.substring(0, 200));
       });
     }
@@ -492,6 +511,7 @@ program
   .command("mcp")
   .description("Start MCP server (stdio transport) for agent connectivity")
   .action(async () => {
+    applyLocalObserveSwitch(process.env);
     const { config, db, provider, vectorIndex } = await setup({ serving: true });
     // stderr only: stdout is the JSON-RPC stream. Said when the folder is the default, so a person who set nothing can find it.
     if (!process.env.VAULT_PATH) process.stderr.write(`Renor memory: ${config.vaultPath}\n`);
@@ -504,6 +524,32 @@ program
       // stays empty either way, so a JSON-RPC stream is never polluted.
       process.stderr.write(`renor-engine mcp: ${(err as Error).message}\n`);
       process.exit(1);
+    }
+  });
+
+program
+  .command("observe")
+  .description("Hook helper, not for people: store one observation event read from stdin on this computer (no network, no model). Needs RENOR_OBSERVE=1. --count prints how many are stored.")
+  .option("--count", "print the number of stored observations and exit")
+  .option("--purge", "delete every stored observation of this memory folder and exit")
+  .action(async (opts: { count?: boolean; purge?: boolean }) => {
+    try {
+      applyLocalObserveSwitch(process.env);
+      if (opts.purge) { process.stdout.write(`${purgeAllObservations()}\n`); return; }
+      if (opts.count) { process.stdout.write(`${observationCount(process.env)}\n`); return; }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of process.stdin) {
+        size += (chunk as Buffer).length;
+        if (size > OBSERVE_STDIN_MAX_BYTES) { process.exitCode = 1; return; }
+        chunks.push(chunk as Buffer);
+      }
+      const result = observeOnce(Buffer.concat(chunks).toString("utf8"), process.env);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } catch (err) {
+      // Never a stack trace into an agent's hook: one short line, non-zero exit; the hook records the failure.
+      process.stderr.write(`renor-engine observe: ${err instanceof Error ? err.message.split("\n")[0] : "failed"}\n`);
+      process.exitCode = 1;
     }
   });
 
@@ -536,10 +582,12 @@ if (backupEnabled()) {
     .command("backup")
     .description("Archive the memory folder (Markdown notes and the ledger, not the index) with a checksum manifest")
     .option("--out <file>", "archive to write (default: renor-backup-<date>.tar.gz)")
+    .addHelpText("after", "\nExample (restore into an empty folder):\n  renor-engine backup --out backup.tar.gz\n  renor-engine restore backup.tar.gz --to ./restored")
     .action((opts: { out?: string }) => {
       try {
         const r = createBackup(loadConfig().vaultPath, opts.out ?? defaultBackupName());
         console.log(`Backed up ${r.files} file(s), ${r.bytes} bytes, to ${r.out}`);
+        console.log(`Next: renor-engine restore ${r.out} --to <folder>`);
       } catch (err) { backupFail("backup", err); }
     });
   program
@@ -555,6 +603,7 @@ if (backupEnabled()) {
     .command("restore <archive>")
     .description("Verify a backup, then extract it into an empty folder")
     .requiredOption("--to <folder>", "empty folder to restore into")
+    .addHelpText("after", "\nExamples:\n  $ renor-engine restore backup.tar.gz --to ./restored\n")
     .action(async (archive: string, opts: { to: string }) => {
       try {
         const r = await restoreBackup(archive, opts.to);

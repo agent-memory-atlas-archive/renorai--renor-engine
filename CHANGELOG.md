@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Eight opt-in research levers, all off by default, with the unset behaviour byte-identical. Retrieval: `RENOR_RETRIEVE_TYPE_ROUTER` (#2153), `RENOR_RETRIEVE_ENTITY_SIGNAL` (#2144). `get_context`: `RENOR_ANSWER_CITATION_LOCK` keeps only citable memories (#2138). Capture: `RENOR_CAPTURE_LOW_VALUE_FILTER` (#2126), `RENOR_CAPTURE_BACKGROUND_REFLECT` (#2084), `RENOR_CAPTURE_EVOLVE_NEIGHBORS` (#2147), `RENOR_CAPTURE_NOTE_LINKS` (#2149), `RENOR_OBSERVATION_NOTES` (#2152). Each is described in the environment variables reference.
+- Usage rows carry an optional deployment label, `cloud` or `self-hosted` (#2112).
+
+### Changed
+
+- `get_context` and `search_text` reads no longer re-run schema setup and secret scans on every call (#2139).
+
+## 1.5.1 - 2026-11-19
+
+### Fixed
+
+- Removed private literals from memory-map source so the public export passes its privacy scan (#2158).
+
+## 1.5.0 - 2026-11-17
+
+### Added
+
+- `renor-engine observe`: a one-shot command that saves one hook event on your machine, with no network and no model, through the same code as `renor/observe`. Off by default (#2041).
+- Observe hooks for Cursor and Gemini CLI; Cursor prompts keep the project scope, and identical prompts from different turns are told apart (#2007, #2037, #2053).
+- `get_context` says in a few words why each lean memory matched (#1942).
+
+### Changed
+
+- `get_context` now lists notes of the project in use first and another project's notes after, marked `otherProject`. Nothing is dropped. `RENOR_CONTEXT_SCOPE_FIRST=0` restores the previous order (#2059).
+- The indexer splits notes with Windows line endings into paragraphs and headings like other notes (#2049).
+
+- Zero-LLM observation capture (`renor/observe`) is now on by default; `RENOR_OBSERVE=0` is the one off switch and restores the previous replies byte for byte (#1829).
+- Self-hosted stdio (`npx renor-engine mcp`): the default tool list is shorter. With `RENOR_MCP_TOOLS` unset it lists the coding set (`get_context`, `search_text`, `retrieve_memory`, `remember`) with no "call whats_new first" line. Nothing was removed: every other tool still answers by name, and `RENOR_MCP_TOOLS=all` lists everything. A named connection and `RENOR_MCP_LEGACY_STDIO=1` keep the full list.
+- `get_context` lists notes from the current project (and notes outside any project) before notes saved under another project; the others follow, tagged `"otherProject": true`. On by default; `RENOR_CONTEXT_SCOPE_FIRST=0` restores the previous order and replies byte for byte (#2059).
+- The indexer splits CRLF notes into paragraphs and headings the same way as LF notes (#2049).
+- The secret guard refuses more national phone layouts (#2051).
+
+### Added
+
+- `get_context` can say in a few words why each lean memory matched (`why`); off by default, `RENOR_CONTEXT_LEAN_WHY=1` turns it on (#1942).
+- `get_context` can list a saved decision before other memories; off by default, `RENOR_CONTEXT_DECISION_FIRST=1` turns it on (#2033).
+- `search_text` can take a second look with the best hits' words; off by default, `RENOR_RECALL_AGENTIC_GREP=1` turns it on (#2081).
+- Self-hosted observe: `renor capture observe on --local` keeps observation records on your computer (#2041).
+
 ## 1.4.10 - 2026-11-15
 
 ### Fixed

@@ -32,8 +32,8 @@ const QUERY = 'How many days was the camping trip?';
 const ITEMS = JSON.stringify({ items: [{ item: 'camping trip', action: 'went on', amount: '3 days', date: '2023/05/29' }] });
 
 // One note in a folder, one two folders down, one at the top: the three depths a path can have.
-const TRIP = path.join('Sessions', 'trip.md');
-const TOMATOES = path.join('Notes', 'Garden', 'tomatoes.md');
+const TRIP = 'Sessions/trip.md';
+const TOMATOES = 'Notes/Garden/tomatoes.md';
 const INBOX = 'inbox.md';
 const NOTES: Record<string, string> = {
   [TRIP]: '---\nkind: note\nsession_date: "2023-05-29T00:00:00.000Z"\n---\n\n# Trip\n\nWe went camping for 3 days near the lake.\n',
@@ -94,7 +94,7 @@ const hostNames = () => [vault, path.dirname(root), path.basename(path.dirname(r
 /** The file at a path printed in a reply is the note the reply took its text from. */
 function expectNames(notePath: string, text: string): void {
   expect(path.isAbsolute(notePath), notePath).toBe(false);
-  expect(notePath.split(path.sep), notePath).not.toContain('..');
+  expect(notePath.split(/[\\/]/), notePath).not.toContain('..');
   expect(fs.readFileSync(path.join(vault, notePath), 'utf8'), notePath).toContain(text);
 }
 

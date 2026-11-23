@@ -20,7 +20,7 @@ export function noteContentHash(filePath: string, content: string): string {
 }
 
 /** How many line breaks (`\n` alone, as every reader of this format splits) lie before `end` in `text`. */
-function newlinesBefore(text: string, end: number): number {
+export function newlinesBefore(text: string, end: number): number {
   let n = 0;
   for (let at = text.indexOf('\n'); at !== -1 && at < end; at = text.indexOf('\n', at + 1)) n++;
   return n;

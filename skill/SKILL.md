@@ -160,8 +160,9 @@ Same tools and rules; only the connection differs:
 
 ### Stdio (`renor-engine mcp`)
 
-A default install lists the hosted names `whats_new`, `get_context`, `search_text`, `retrieve_memory` and
-`remember`, and the rules above apply to them as written. There is no `search_memory`, `lookup_entity`,
+A default install uses the hosted names `whats_new`, `get_context`, `search_text`, `retrieve_memory` and
+`remember`, and the rules above apply to them as written. By default only the four coding tools are listed
+(`whats_new` stays callable); `RENOR_MCP_TOOLS=all` lists all five. There is no `search_memory`, `lookup_entity`,
 `remember_note`, `save_memory`, `memory_status` or `export_memory` here.
 
 The older stdio names stay callable but are not listed. People who still run them set

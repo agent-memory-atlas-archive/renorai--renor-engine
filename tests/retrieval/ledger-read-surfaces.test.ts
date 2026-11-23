@@ -1,3 +1,4 @@
+import { removeTestDir } from '../helpers/removeDb';
 import { describe, it, expect, afterAll, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
@@ -52,14 +53,16 @@ const PASTED = '# Pasted\n\nA record copied from somewhere:\n\n## MEM_NOSUCHEVEN
 
 const dirs: string[] = [];
 const dbs: Database.Database[] = [];
+const apps: Array<{ locals: Record<string, unknown> }> = [];
 afterEach(() => {
+  for (const app of apps.splice(0)) (app.locals.closeEvidence as (() => void) | undefined)?.();
   while (dbs.length) { try { dbs.pop()!.close(); } catch { /* already closed */ } }
   delete process.env.RENOR_SEARCH_EVIDENCE;
   delete process.env.RENOR_STRUCTURED_CONTEXT;
   delete process.env.RENOR_READ_HONESTY;
 });
 afterAll(() => {
-  for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) removeTestDir(dir);
 });
 
 function tmpDir(prefix: string): string {
@@ -77,6 +80,7 @@ async function writeVault(files: Record<string, string>, ledgerRel: string, reco
   }
   // The writer projects into a database; this one is thrown away, the surfaces below open their own.
   const scratch = openDb(path.join(tmpDir('ledger-surfaces-scratch-'), 'scratch.db'));
+  dbs.push(scratch);
   runMigrations(scratch);
   await remember(scratch, vault, ledgerRel, { subject: 'user', predicate: 'prefers_runtime', object: 'Bun', statement: BUN, source: 'claude' });
   await remember(scratch, vault, ledgerRel, { subject: 'Dana', predicate: 'works_at', object: 'Initech', source: 'claude' });
@@ -296,6 +300,7 @@ describe('the canonical keyword tool: records of the ledger never take a place f
 describe('POST /retrieve-context keeps the ledger out', () => {
   const read = (ix: Indexed, ledgerPath: string | undefined) => {
     const app = createServer(ix.db, ix.vectorIndex, ix.provider as never, ix.vault, [], undefined, ledgerPath, { apiToken: TOKEN });
+    apps.push(app);
     return (query: string, extra: Record<string, unknown> = {}) => request(app).post('/retrieve-context').set('Authorization', `Bearer ${TOKEN}`).send({ query, ...extra });
   };
 
@@ -437,7 +442,7 @@ function sourceFiles(dir: string): Array<{ rel: string; text: string }> {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...sourceFiles(full));
-    else if (entry.name.endsWith('.ts')) out.push({ rel: path.relative(path.join(REPO_ROOT, 'src'), full), text: fs.readFileSync(full, 'utf8') });
+    else if (entry.name.endsWith('.ts')) out.push({ rel: path.relative(path.join(REPO_ROOT, 'src'), full).split(path.sep).join('/'), text: fs.readFileSync(full, 'utf8') });
   }
   return out;
 }

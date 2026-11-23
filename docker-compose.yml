@@ -1,0 +1,26 @@
+# One-command local Renor server (HTTP MCP with owner sign-in). From this folder:
+#   MVP_OWNER_EMAIL=you@example.com MVP_OWNER_PASSWORD="$(openssl rand -base64 18)" docker compose up -d
+# or put those two lines in a file named .env next to this one. Memory lives on the named volume `renor-data`
+# and survives `docker compose down` and restarts. docs/self-hosting.md lists every setting.
+services:
+  renor:
+    # Builds the local Dockerfile. Once the image is published, `docker compose pull` can use it instead.
+    image: ghcr.io/renorai/renor-engine:latest
+    build: .
+    pull_policy: build
+    restart: unless-stopped
+    ports:
+      # Published on this machine only. MVP_BASE_URL is localhost, so the plain-HTTP bind is accepted.
+      - "127.0.0.1:${MVP_PORT:-3471}:${MVP_PORT:-3471}"
+    environment:
+      MVP_HOST: 0.0.0.0
+      MVP_PORT: ${MVP_PORT:-3471}
+      MVP_OWNER_EMAIL: "${MVP_OWNER_EMAIL:?set MVP_OWNER_EMAIL to the email you sign in with}"
+      MVP_OWNER_PASSWORD: "${MVP_OWNER_PASSWORD:?set MVP_OWNER_PASSWORD (openssl rand -base64 18 makes one)}"
+      # The exact loopback callback of your agent (Claude Code: --callback-port 39472). Comma-separated for several.
+      MVP_ALLOWED_CALLBACK_URIS: ${MVP_ALLOWED_CALLBACK_URIS:-http://localhost:39472/callback}
+    volumes:
+      - renor-data:/data
+
+volumes:
+  renor-data:

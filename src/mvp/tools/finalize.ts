@@ -17,9 +17,10 @@ export function finishToolSurface(ctx: ToolContext): void {
   if (directory) for (const name of DIRECTORY_HIDDEN_TOOLS) registeredToolEntry(server, name).enabled = false;
 
   // The profile's tool subset: the others are disabled in the SDK's registry, so neither listed nor run.
-  if (profile.tools || profile.descriptions) {
+  if (profile.tools || profile.listOnly || profile.descriptions) {
     const registered = Object.keys((server as unknown as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {});
     checkProfileTools(profile, registered);
+    // `listOnly` (the shipped default) is applied to the list below and disables nothing: every tool stays callable.
     if (profile.tools) for (const name of registered) if (!profile.tools.has(name)) registeredToolEntry(server, name).enabled = false;
   }
 
@@ -42,6 +43,7 @@ export function finishToolSurface(ctx: ToolContext): void {
     // RENOR_MCP_SINGLE_SAVE: save_memory and remember_note stay callable, only unlisted (an explicit tool list that names them keeps them).
     if (singleSaveEnabled()) for (const name of UNLISTED_SAVE_TOOLS) if (!profile.tools?.has(name)) hidden.add(name);
     if (forDirectory) for (const name of [...HIVE_TOOLS, ...DIRECTORY_HIDDEN_TOOLS]) hidden.add(name);
+    if (profile.listOnly && !forDirectory) for (const tool of answer?.tools ?? []) if (!profile.listOnly.has(String(tool.name))) hidden.add(tool.name);
     if (hidden.size === 0 && !forDirectory && !profile.descriptions) return answer;
     // An answer this cannot read is not passed on unfiltered.
     if (!Array.isArray(answer?.tools)) throw new Error('tools/list answered without a tools array');

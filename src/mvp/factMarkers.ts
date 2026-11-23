@@ -18,6 +18,21 @@ export function factAuthorsByEvent(db: Database.Database, eventIds: readonly str
   return new Map(rows.map(row => [row.eventId.toLowerCase(), row.author]));
 }
 
+/** The project each saved fact among these ledger events was saved in, by event id (lower case); `global` and unscoped events are absent. */
+export function factScopesByEvent(db: Database.Database, eventIds: readonly string[]): Map<string, string> {
+  const ids = [...new Set(eventIds)];
+  if (ids.length === 0) return new Map();
+  const rows = listStatement(
+    db, ids.length, marks => `SELECT event_id AS eventId, scope FROM facts WHERE event_id IN (${marks})`,
+  ).all(...paddedList(ids.map(id => id.toUpperCase()))) as Array<{ eventId: string; scope: string | null }>;
+  const out = new Map<string, string>();
+  for (const row of rows) {
+    const slug = row.scope?.trim().toLowerCase().replace(/^(?:scope|project):/, '');
+    if (slug && slug !== 'global') out.set(row.eventId.toLowerCase(), slug);
+  }
+  return out;
+}
+
 /**
  * The marker of a memory that is one or more ledger events. A chunk normally holds one event; when it holds several
  * facts of several authors, none is named, and an import or a reserved source among them is still marked untrusted.

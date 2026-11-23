@@ -74,10 +74,19 @@ const APPEARS_TO_CONTAIN: Record<Exclude<Refusal, 'unavailable'>, string> = {
 };
 
 /**
+ * Where the part that looked like a secret is, and what shape it has: "characters 13-53 (•••••••• •• •••••••)".
+ * The shape carries no character of the value (maskMatch), so this says WHICH part to reword without repeating it.
+ */
+function whichPart(detail: SecretFinding | undefined): string {
+  if (!detail) return '';
+  return ` What looked like it: characters ${detail.at + 1}-${detail.at + detail.length} (${detail.masked}).`;
+}
+
+/**
  * What the caller is told. It names the field and the kind of thing found from fixed text, never the
  * text itself, and says what to do next. Kept under the 400 characters the MCP error reply keeps.
  */
-function refusalMessage(field: string, reason: Refusal, action: GuardAction): string {
+function refusalMessage(field: string, reason: Refusal, action: GuardAction, detail?: SecretFinding): string {
   const lead = action === 'save' ? 'Nothing was saved' : 'Nothing was changed';
   if (reason === 'unavailable') {
     return `${lead}: the secret guard (RENOR_SECRET_GUARD) is on but could not check the ${field}, so it refuses by default. `
@@ -93,8 +102,8 @@ function refusalMessage(field: string, reason: Refusal, action: GuardAction): st
       + 'so this memory was not restored: restoring would put its text back into live memory. It stays retired.';
   }
   return `${lead}: the ${field} appears to contain ${APPEARS_TO_CONTAIN[reason]}, and the secret guard (RENOR_SECRET_GUARD) is on, `
-    + 'so Renor does not store it. Save what it is for instead (for example "the staging API key is in 1Password"), '
-    + 'or reword the text without the value, then save again.';
+    + `so Renor does not store it.${whichPart(detail)} Save what it is for instead (for example "the staging API key is in 1Password"), `
+    + 'or save the rest with that part reworded or left out.';
 }
 
 /** The operation was refused: nothing was written or moved. `reason` is what was found, or `unavailable` when the guard could not decide. */
@@ -102,13 +111,16 @@ export class SecretRefusedError extends Error {
   readonly field: string;
   readonly reason: Refusal;
   readonly action: GuardAction;
+  /** Where the part that matched is and what shape it has, when the scanner found it (never its characters). */
+  readonly detail?: SecretFinding;
 
-  constructor(field: string, reason: Refusal, action: GuardAction = 'save') {
-    super(refusalMessage(field, reason, action));
+  constructor(field: string, reason: Refusal, action: GuardAction = 'save', detail?: SecretFinding) {
+    super(refusalMessage(field, reason, action, detail));
     this.name = 'SecretRefusedError';
     this.field = field;
     this.reason = reason;
     this.action = action;
+    this.detail = detail;
   }
 }
 
@@ -131,9 +143,9 @@ function logRefusal(field: string, reason: Refusal, action: GuardAction | 'impor
   }));
 }
 
-function refuse(field: string, reason: Refusal, action: GuardAction, cause?: unknown): never {
+function refuse(field: string, reason: Refusal, action: GuardAction, cause?: unknown, detail?: SecretFinding): never {
   logRefusal(field, reason, action, cause);
-  throw new SecretRefusedError(field, reason, action);
+  throw new SecretRefusedError(field, reason, action, detail);
 }
 
 /** For a text the guard cannot read in full (too large to hold): refuse, as it does when its own check fails. */
@@ -167,7 +179,8 @@ export async function assertStorable(
       refuse(field, 'unavailable', action, cause);
     }
     if (verdict.decision === 'sensitive') {
-      refuse(field, (verdict as Partial<SensitiveDecision>).finding?.class ?? 'sensitive', action);
+      const finding = (verdict as Partial<SensitiveDecision>).finding;
+      refuse(field, finding?.class ?? 'sensitive', action, undefined, finding);
     }
   }
 }

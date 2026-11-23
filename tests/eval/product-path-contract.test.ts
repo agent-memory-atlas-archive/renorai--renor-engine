@@ -174,7 +174,7 @@ describe('product-path contract: gold isolation through the real public CLI surf
         // The runner really used the public CLI surface.
         expect(manifest.publicEntryPoint).toBe('cli');
         expect((manifest.entryPointDetail as { transport: string }).transport).toBe('cli-subprocess');
-        expect((manifest.entryPointDetail as { command: string }).command).toContain('src/cli.ts');
+        expect((manifest.entryPointDetail as { command: string }).command.split(path.sep).join('/')).toContain('src/cli.ts');
         expect(manifest.executionKind).toBe('product-public');
         expect(manifest.goldIsolated).toBe(true);
         // Manifest contract fields are internally valid.

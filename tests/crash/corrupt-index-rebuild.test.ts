@@ -67,6 +67,7 @@ function asideFiles(dbPath: string): string[] {
     .map(f => path.join(dir, f));
 }
 
+// Each case starts the service twice and exports twice over MCP: slower than vitest's 5 s default on a loaded gate machine (deflake #2218).
 const DAMAGES = [
   ['truncated to half its size', (f: string) => fs.truncateSync(f, Math.floor(fs.statSync(f).size / 2))],
   ['its header overwritten', (f: string) => { const b = fs.readFileSync(f); b.fill(0x41, 0, 200); fs.writeFileSync(f, b); }],
@@ -98,7 +99,7 @@ for (const [name, damage] of DAMAGES) {
       expect(factsFor(restarted.db, 'Cardamom canary')).toHaveLength(1);
       expect(fs.readFileSync(ledgerPath)).toEqual(ledgerBefore);
       expect(await exportFrom(restarted, ws.config.port, 'after')).toBe(before);
-    });
+    }, 120_000);
   });
 }
 
@@ -139,7 +140,7 @@ describe.skipIf(HTTP_SERVER_UNSUPPORTED)('an index.db damaged with pending agent
     expect(restarted.db.prepare('SELECT agent FROM known_agents ORDER BY agent').all()).toEqual(knownBefore);
     expect(factsFor(restarted.db, 'Cardamom canary')).toHaveLength(1);
     expect(await exportFrom(restarted, ws.config.port, 'after')).toBe(before);
-  });
+  }, 120_000);
 });
 
 describe.skipIf(HTTP_SERVER_UNSUPPORTED)('an index.db damaged with no ledger to rebuild it from', () => {

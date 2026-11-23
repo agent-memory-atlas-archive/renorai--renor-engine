@@ -243,6 +243,8 @@ const ENVIRONMENT_FIELDS: Record<string, FieldSpec> = {
   ci: { type: 'boolean' },
   // true when the engine ran as Renor's own (CONTEXT_FIELDS.internal); optional because an older engine leaves it out.
   internal: { type: 'boolean', optional: true },
+  // cloud when a hosted workspace made the row, self-hosted otherwise; optional because an older engine leaves it out.
+  deployment: { type: 'string', oneOf: DEPLOYMENTS, optional: true },
   transport: { type: 'string', oneOf: TRANSPORTS },
 };
 
@@ -382,6 +384,7 @@ export const ROW_FIELDS: Record<RowKind, Record<string, FieldSpec>> = {
     session: { type: 'string', pattern: INSTALL_ID },
     step: { type: 'string', oneOf: FUNNEL_STEPS },
     internal: { type: 'boolean', optional: true },
+    deployment: { type: 'string', oneOf: DEPLOYMENTS, optional: true },
   },
 };
 

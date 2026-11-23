@@ -12,6 +12,8 @@ import { remember, factsFor, resolveLedgerPath, DEFAULT_LEDGER_REL } from '../me
 import { indexFile } from '../indexer/pipeline';
 import { pickEntityName, pickTopK, quoteFtsQuery, shownPage } from '../retrieval/queryHelpers';
 import { keywordSearch } from '../retrieval/keyword';
+import path from 'path';
+import { observeEnabled, searchObservations } from '../mvp/observations.js';
 import { searchTextFallbackEnabled } from '../mvp/agentMemory.js';
 import { clientPath } from '../mvp/engine';
 import { selectNoteIdentityHits, NOTE_IDENTITY_EXTRA } from '../retrieval/noteIdentity';
@@ -39,7 +41,7 @@ import * as z from 'zod';
 import { AGENT_LEVELS, SHARING_TOOL_DESCRIPTION } from '../sharing/agentTool';
 import { askThrough, stdioLearning, type StdioLearning } from './learning';
 import { readWhatsNew, whatsNewPageFromEnv } from '../memory/whatsNew';
-import { HOSTED_STDIO_CODING_TOOLS, HOSTED_STDIO_TOOLS, HOSTED_STDIO_NAMES, legacyStdio, stdioInstructions } from './hostedSurface';
+import { HOSTED_STDIO_CODING_TOOLS, HOSTED_STDIO_TOOLS, HOSTED_STDIO_NAMES, legacyStdio, stdioCodingList, stdioInstructions } from './hostedSurface';
 import { OUT_ASK_AGENT, OUT_HANDOFF, OUT_LIST_REQUESTS, OUT_REQUEST, OUT_WHATS_NEW, toolCarriesStructured } from '../mvp/outputSchemas';
 
 export function createMcpTools(
@@ -126,6 +128,12 @@ export function createMcpTools(
         if (used > budget && (facts.length + memories.length) > 0) break;
         if (hit.reason === 'fact') facts.push({ text: hit.text, headingPath: hit.headingPath, current: true });
         else memories.push({ text: hit.text, notePath: hit.notePath, session_date: hit.session_date, score: hit.score, reason: hit.reason, matched: true });
+      }
+      // RENOR_OBSERVE (the local saving switch): what hooks saved without a model, found by its words. Off, this adds nothing.
+      if (query && observeEnabled()) {
+        for (const hit of searchObservations(db, path.resolve(config.vaultPath), query, 5, {}, args?.scope)) {
+          memories.push({ text: hit.text, notePath: hit.notePath, session_date: hit.session_date, score: hit.score, reason: hit.reason, matched: true, source: 'observation' });
+        }
       }
       if (args?.include_history && query) {
         const subject = pickEntityName({ name: query });
@@ -539,7 +547,8 @@ export function utf8Lines(source: Readable, onInvalid: () => void): Readable {
  */
 /**
  * RENOR_MCP_TOOLS=coding on the stdio server: the stdio counterpart of the hosted coding set (get_context, search_text,
- * retrieve_memory, remember, memory_status). Hive, handoff and sharing_level are not listed. Unset or `all` lists every tool.
+ * retrieve_memory, remember, memory_status). Hive, handoff and sharing_level are not listed (they stay callable). It is the default
+ * when RENOR_MCP_TOOLS is unset (see stdioCodingList); `all` lists every tool.
  */
 export const STDIO_CODING_TOOLS = ['search', 'keyword', 'facts', 'note', 'status'] as const;
 
@@ -552,8 +561,8 @@ export function registerMcpHandlers(
   const env = { ...process.env };
   const legacy = legacyStdio(env);
   const carries = (name: string) => toolCarriesStructured(name, env);
-  const coding = env.RENOR_MCP_TOOLS?.trim() === 'coding';
   const named = typeof byName.ask_agent === 'function'; // the hive tools exist only for a named connection
+  const coding = stdioCodingList(env, named);
   const hive = named ? HIVE_TOOLS.filter(tool => !(tool.name === 'whats_new' && !legacy)) : [];
   const handoff = typeof byName[HANDOFF_TOOL_NAME] === 'function' ? [HANDOFF_TOOL] : [];
   const hostedNames = HOSTED_STDIO_NAMES as readonly string[];
@@ -623,11 +632,11 @@ export async function startMcpServer(
   config: Config
 ) {
   // Default: instructions that name only the tools listed (hostedSurface.ts). RENOR_MCP_LEGACY_STDIO=1: none, as before.
-  const codingList = process.env.RENOR_MCP_TOOLS?.trim() === 'coding';
-  const instructions = legacyStdio() ? undefined : stdioInstructions(codingList ? HOSTED_STDIO_CODING_TOOLS : HOSTED_STDIO_NAMES);
-  const server = new Server({ name: 'renor', version: ENGINE_VERSION }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
   const evidence = resolveEvidenceToolOptions(config);
   const tools = createMcpTools(db, vectorIndex, provider, config, evidence);
+  const codingList = stdioCodingList(process.env, typeof (tools as unknown as Record<string, unknown>).ask_agent === 'function');
+  const instructions = legacyStdio() ? undefined : stdioInstructions(codingList ? HOSTED_STDIO_CODING_TOOLS : HOSTED_STDIO_NAMES);
+  const server = new Server({ name: 'renor', version: ENGINE_VERSION }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
   // Learning and sharing, as the HTTP service has them (src/mcp/learning.ts). Null under DO_NOT_TRACK=1 or RENOR_SHARING=off.
   const learning = stdioLearning(config, { agent: () => server.getClientVersion()?.name?.trim() || 'unnamed' });
 

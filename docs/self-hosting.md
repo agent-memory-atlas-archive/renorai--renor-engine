@@ -48,7 +48,7 @@ renor-engine: Renor needs Node 22.16.0 or newer (it uses Node's built-in SQLite)
 
 ## Updates and the npm registry
 
-`npx -y renor-engine mcp` fetches the newest release each time the app starts, so nothing needs upgrading by hand. It needs the npm registry at that moment: with the registry unreachable (offline, blocked, an outage) it does not start, even with a copy on the disk. `renor-engine status` and `renor-engine doctor` show the installed version and, when the registry answers within 2 seconds, the latest one; they ask nothing when sharing is off, `DO_NOT_TRACK=1` is set, or `--offline` is given. Pin a version in the command (`npx -y renor-engine@1.4.10 mcp`). A machine that must start offline can use `npx --prefer-offline -y renor-engine mcp`; `scripts/npx/measure-npx-update.sh` measures both cases in an isolated cache.
+`npx -y renor-engine mcp` fetches the newest release each time the app starts, so nothing needs upgrading by hand. It needs the npm registry at that moment: with the registry unreachable (offline, blocked, an outage) it does not start, even with a copy on the disk. `renor-engine status` and `renor-engine doctor` show the installed version and, when the registry answers within 2 seconds, the latest one; they ask nothing when sharing is off, `DO_NOT_TRACK=1` is set, or `--offline` is given. Pin a version in the command (`npx -y renor-engine@1.5.0 mcp`). A machine that must start offline can use `npx --prefer-offline -y renor-engine mcp`; `scripts/npx/measure-npx-update.sh` measures both cases in an isolated cache.
 
 ## Building from a ZIP or tarball
 
@@ -151,13 +151,23 @@ If the browser does not open, run `codex mcp login renor-local-http` in your own
 
 ## Docker and one-click hosts
 
-The image (`Dockerfile`) runs the HTTP server above as an unprivileged user, keeps everything on one volume at `/data`, and needs only the owner's email and password. It starts with no model, no key and no telemetry. The entrypoint (`docker/entrypoint.sh`) fills in what you leave unset; anything you set wins:
+The image (`Dockerfile`) runs the HTTP server above as an unprivileged user, keeps everything on one volume at `/data`, and needs only the owner's email and password. It starts with no model and no key. Anonymous usage numbers (counts and labels only, never a note or a query) are on by default, with a first-run notice; to opt out set `DO_NOT_TRACK=1` or `RENOR_SHARING=off`, or run `renor-engine telemetry off` (see [TELEMETRY.md](TELEMETRY.md)). The entrypoint (`docker/entrypoint.sh`) fills in what you leave unset; anything you set wins:
 
 - `RENOR_DATA_DIR=/data`, the one folder to keep on a volume; `MVP_MEMORY_DIR` is `$RENOR_DATA_DIR/memory`, `MVP_AUTH_STATE_PATH` is `$RENOR_DATA_DIR/auth/clients.json` (its folder made `0700`), and the stdio server's `VAULT_PATH` is `$RENOR_DATA_DIR/vault`.
 - `MVP_PORT` is `$PORT` (Render and Railway set it; `fly.toml` sets `8080`), else `3471`. `MVP_HOST` is `127.0.0.1`; set it to `0.0.0.0` only where a proxy must reach the server over the network (the three platform files below do). A bind beyond loopback is refused at start unless `MVP_BASE_URL` is `https://` (a `localhost` URL is accepted, for a port published on your own machine). `MVP_TRUST_PROXY_HOPS` is `0`; set it to the number of proxies in front (`1` on the platform files) so each client has its own login and OAuth rate-limit bucket. Too high a number lets a client choose its own address and evade the login limit, so any value above `0` on a public bind, and any value above `1`, is refused unless `MVP_TRUST_PROXY_HOPS_ACK_SPOOFING=1` confirms it (the three platform files set it).
 - Failed owner logins are counted per client (an IPv4 address or an IPv6 /64) and in total. One client is locked out after `ceil(MVP_LOGIN_MAX_FAILURES / 2)` failures, without affecting others; the total across all clients is held to `MVP_LOGIN_MAX_FAILURES` per window, so rotating addresses never raises the guess rate. If several clients reach the total, login is locked for everyone, you included: wait it out, or unlock at once with `docker kill -s USR2 <container>` (a signal to the server process; nothing remote can send it). That ends the lockouts but keeps the failure counts, so the next failure locks again and the total never exceeds the limit.
 - `MVP_BASE_URL` is `$RENDER_EXTERNAL_URL`, else `https://$RAILWAY_PUBLIC_DOMAIN`, else `https://$FLY_APP_NAME.fly.dev`, else `http://localhost:$MVP_PORT`. Set it yourself behind your own domain.
-- `MVP_EMBEDDING_PROVIDER` and `EMBEDDING_PROVIDER` are `none`. The image has no local model, so `local` does not work in it; `openai` and `vertex` do, with their keys. `RENOR_TELEMETRY_DISABLED=true`.
+- `MVP_EMBEDDING_PROVIDER` and `EMBEDDING_PROVIDER` are `none`. The image has no local model, so `local` does not work in it; `openai` and `vertex` do, with their keys. `RENOR_TELEMETRY_DISABLED=true` (this switches off only the older optional remote sink, not anonymous usage numbers).
+
+Quickest path, from `engine/` (`docker-compose.yml`; memory stays on the `renor-data` volume across restarts):
+
+```bash
+export MVP_OWNER_EMAIL=you@example.com MVP_OWNER_PASSWORD="$(openssl rand -base64 18)"
+docker compose up -d
+claude mcp add --transport http --scope user --callback-port 39472 renor http://localhost:3471/mcp
+```
+
+Put the two variables in a `.env` file next to the compose file to keep them between runs. To use another agent's callback, set `MVP_ALLOWED_CALLBACK_URIS`. The plain `docker run` equivalent:
 
 ```bash
 docker build -t renor-engine .        # or use ghcr.io/renorai/renor-engine once it is published
@@ -181,11 +191,24 @@ claude mcp add --transport http --scope user --callback-port 39472 renor http://
 
 Then connect an agent to `<url>/mcp` as in [Connect Claude Code over HTTP](#connect-claude-code-over-http) and sign in as the owner. The hosts' own health checks are not configured: they call from outside the container under a host name the server does not answer to; the image's `HEALTHCHECK` covers `docker run`.
 
+## Saving without a model (off by default)
+
+The self-hosted engine can save what you type without asking a model: your app's hook hands each prompt and tool name to the engine on this computer, and a later `get_context` finds them by their words. Nothing leaves your machine: no network, no model call.
+
+```
+npx renor capture observe on --local    # turn it on and add the hook to Claude Code, Codex, Cursor and Gemini CLI (only the ones installed)
+npx renor capture observe status        # on or off, where records go, how many were saved here
+npx renor capture observe off           # turn it off and remove the hooks
+npx renor capture --uninstall --purge   # also deletes the saved records
+```
+
+`renor connect --local` adds the hooks only while the switch is on. Each event goes through the same checks as the hosted service: a value that looks like a secret is dropped, a prompt is cut at 8 KB, records expire after 90 days, at most 20,000 are kept, and an event the hook retries is stored once. A failure never reaches your agent; `renor capture status` shows the failures. Records live in the engine's index file in your memory folder (`.semantic-memory/index.db`); an 8 KB prompt takes about 18 KB there, so 20,000 of them come to about 350 MB, and a typical short prompt takes far less. See [`RENOR_OBSERVE`](ENVIRONMENT-VARIABLES-REFERENCE.md).
+
 ## Two different tool lists
 
-The command-line server publishes five tools by default, the hosted names: `whats_new`, `get_context`, `search_text`, `retrieve_memory` and `remember`. With `RENOR_MCP_LEGACY_STDIO=1` it publishes the older eight instead: `search`, `evidence`, `keyword`, `entity`, `remember_fact`, `facts`, `status` and `note` (the older names stay callable either way). Naming its connection adds the five hive tools (below). The HTTP server publishes a different set of twenty-four tools, including `remember`, `get_context` and the five hive tools `whats_new`, `ask_agent`, `list_requests`, `answer_request` and `close_request`. [skill/SKILL.md](../skill/SKILL.md) describes the HTTP tools for an agent.
+The command-line server uses the hosted names: `whats_new`, `get_context`, `search_text`, `retrieve_memory` and `remember`. By default it lists the four coding tools (`whats_new` stays callable); `RENOR_MCP_TOOLS=all` lists all five. With `RENOR_MCP_LEGACY_STDIO=1` it publishes the older eight instead: `search`, `evidence`, `keyword`, `entity`, `remember_fact`, `facts`, `status` and `note` (the older names stay callable either way). Naming its connection adds the five hive tools (below). The HTTP server publishes a different set of twenty-four tools, including `remember`, `get_context` and the five hive tools `whats_new`, `ask_agent`, `list_requests`, `answer_request` and `close_request`. [skill/SKILL.md](../skill/SKILL.md) describes the HTTP tools for an agent.
 
-`renor-engine connect <app>` prints the entry with `"env": {"RENOR_MCP_TOOLS": "coding"}`, and the command-line server then lists five tools: `search`, `keyword`, `facts`, `note` and `status` (the hive and handoff tools are not listed). Run `renor-engine connect <app> --tools full` for the entry without it (every tool); an unset or `all` value lists every tool.
+`renor-engine connect <app>` prints the entry with `"env": {"RENOR_MCP_TOOLS": "coding"}`, and the command-line server then lists the four coding tools: `get_context`, `search_text`, `retrieve_memory` and `remember` (with `RENOR_MCP_LEGACY_STDIO=1`, the five older names `search`, `keyword`, `facts`, `note` and `status`; the hive and handoff tools are not listed). Run `renor-engine connect <app> --tools full` for the entry without it (every tool); an unset value now also lists the short coding set (`get_context`, `search_text`, `retrieve_memory`, `remember`; every other tool stays callable by name); `all` lists every tool.
 
 ## Owner names
 

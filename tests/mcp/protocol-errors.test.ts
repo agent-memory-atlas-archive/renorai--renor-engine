@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { once } from 'node:events';
+import { removeTestDir } from '../helpers/removeDb';
 import { spawnTree, killTree } from '../helpers/childTree';
 import { startWorkspace, restoreEnv, type Harness } from '../helpers/hiveHarness';
 import { loadMvpConfig } from '../../src/mvp/config';
@@ -30,16 +30,16 @@ function startStdio() {
       RENOR_TELEMETRY_DISABLED: 'true', RENOR_EVIDENCE_MODE: 'off', RENOR_VAULT_STALENESS: 'off', RENOR_SHARING: 'off' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
   child.stdin!.on('error', () => {});
   let stderr = '';
   child.stderr!.on('data', chunk => { stderr += chunk.toString(); });
   let raw = '';
   child.stdout!.on('data', chunk => { raw += chunk.toString(); });
   cleanups.push(async () => {
-    const closed = once(child, 'close');
     killTree(child);
     await closed;
-    fs.rmSync(vault, { recursive: true, force: true });
+    removeTestDir(vault);
   });
   const lines = (): string[] => raw.split('\n').filter(line => line.length > 0);
   const replies = (): any[] => lines().map(line => {

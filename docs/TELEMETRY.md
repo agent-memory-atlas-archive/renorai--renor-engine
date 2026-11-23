@@ -271,11 +271,11 @@ before it is written to the learning log (`src/sharing/context.ts`); the log kee
 the name your client declared). A value no list holds is sent as `other` or null, never as itself.
 
 - **deployment**: `cloud` (Renor's hosted service) or `self-hosted`.
-- **internal**: true only when the engine runs as Renor's own: `RENOR_SHARING_INTERNAL=1`, or a CI or test runner's marker (`CI=true`,
-  `GITHUB_ACTIONS`, `VITEST`, `JEST_WORKER_ID`, `NODE_ENV=test`). `RENOR_SHARING_INTERNAL=0` says it is not, whatever else is set. Renor's
+- **internal**: true only when the engine runs as Renor's own: `RENOR_SHARING_INTERNAL=1`, a CI or test runner's marker (`CI=true`,
+  `GITHUB_ACTIONS`, `VITEST`, `JEST_WORKER_ID`, `NODE_ENV=test`), or the engine running from a git checkout (a `.git` folder in the engine's folder or the one above it; an npm, npx or global install never has one). `RENOR_SHARING_INTERNAL=0` says it is not, whatever else is set. Renor's
   gates, CI, eval harnesses and its own hosted workspaces set it (or keep sharing off), and Renor's own reports leave these rows out. If you
-  run Renor inside your own CI, your rows are marked internal too and left out of Renor's reports (they are still stored, and deleted like any
-  other on request); set `RENOR_SHARING_INTERNAL=0` there to count them.
+  clone the engine's repository and run it from the clone, or run Renor inside your own CI, your rows are marked internal too and left out of Renor's reports (they are still stored, and deleted like any
+  other on request); set `RENOR_SHARING_INTERNAL=0` there to count them (the boolean is all that is recorded; no path is sent).
 - **release**, **app**, **profile**: recorded with each call (a call made before an upgrade keeps the release it ran on): the engine's
   released version as major.minor (`1.4`), the AI application's family (`claude-code`, `cursor`, `codex`, `chatgpt`, `claude-ai`, `hermes`, `dsh`, `other`), read from
   the name the MCP client declares, its User-Agent or the connection's name, and the tool set the connection had (`full`, `coding`, `lean`,
@@ -399,6 +399,7 @@ Once per install (`install/1`), at the first send after the first-run notice:
 | `install/1.arch` | `x64`, `arm64`, `arm`, `ia32` or `other` |
 | `install/1.ci` | whether a standard CI variable is set (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `TRAVIS`, `JENKINS_URL`, `TF_BUILD`, ...); only true or false |
 | `install/1.internal` | true when Renor's own engine made it (a gate, CI, a test or load run, Renor's own workspace); same rule as `retrieval-labelled/1.internal`. Older engines leave it out |
+| `install/1.deployment` | `cloud` (a hosted workspace) or `self-hosted`; nothing else, and no workspace or tenant identifier. Older engines leave it out |
 | `install/1.transport` | `stdio` (`renor-engine mcp`) or `http` (the service) |
 
 Once per active day (`heartbeat/1`), after the day is over:
@@ -415,6 +416,7 @@ Once per active day (`heartbeat/1`), after the day is over:
 | `heartbeat/1.arch` | as in `install/1` |
 | `heartbeat/1.ci` | as in `install/1` |
 | `heartbeat/1.internal` | as in `install/1` |
+| `heartbeat/1.deployment` | as in `install/1` |
 | `heartbeat/1.transport` | as in `install/1` |
 | `heartbeat/1.client_name` | the MCP client, from its own `initialize` (`clientInfo.name`), as one of a closed list: `claude-code`, `claude-ai`, `claude-desktop`, `chatgpt`, `openai-mcp`, `codex`, `cursor`, `windsurf`, `vscode`, `visual-studio-code`, `zed`, `cline`, `roo-code`, `continue`, `goose`, `gemini-cli`, `opencode`, `warp`, `jetbrains`, `lm-studio`, `librechat`, `mcp-inspector`, `hermes`, `renor`; any other name is sent as `other`, never as itself; the last client seen that day, when several connected; null when no client declared one |
 | `heartbeat/1.client_version` | the client's `clientInfo.version` when it is shaped like a version, cut to major.minor (`1.0.42` is sent as `1.0`, `v2.3` as `2.3`), else null |
@@ -444,6 +446,7 @@ One row per funnel step a process reached (`funnel/1`), each step at most once p
 | `funnel/1.install_age` | how long this install had existed then (the same four ranges) |
 | `funnel/1.session` | a random id made when the process started (16 random bytes, hex) and never stored anywhere else; it is not the install id |
 | `funnel/1.internal` | as in `install/1` |
+| `funnel/1.deployment` | as in `install/1` |
 | `funnel/1.step` | `installed` (the install's usage file was made), `notice_shown` (the first-run notice was shown), `first_save`, `first_recall`, `first_recall_used` (after a recall, a memory was opened with `read_memory` or a save cited what it built on) |
 
 **The opt-out count (`opt-out/1`).** When sharing is turned off (`renor-engine telemetry off`, an agent's sharing tool, the dashboard,
@@ -463,7 +466,7 @@ request it came in on, and refuses a row that already carries it.
 
 | Field | Meaning |
 | --- | --- |
-| `country` | the country the request came from, as its 2-letter ISO code (`BR`, `US`), read from the hosting platform's geo header; null when the header is missing, is not exactly two letters, or is `XX` (unknown). Your network address is never stored, not even hashed into a row: it is used only as a rate-limit counter key, an HMAC under a key that changes every day, dropped after two days |
+| `country` | the country the request came from, as its 2-letter ISO code (`BR`, `US`), read from the hosting platform's geo header; null when no supported header contains a two-letter code other than `XX` (unknown). Your network address is never stored, not even hashed into a row: it is used only as a rate-limit counter key, an HMAC under a key that changes every day, dropped after two days |
 
 **Never sent at any level:** the keyed hashes in your learning log, memory ids, subjects, predicates, note paths, headings, scope names,
 agent names, your session ids, tool arguments or replies, error messages, the commit of your build, the day you installed, or an address or

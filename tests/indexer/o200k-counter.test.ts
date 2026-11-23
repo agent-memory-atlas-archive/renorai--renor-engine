@@ -88,7 +88,9 @@ describe('the packed vocabulary', () => {
     const res = spawnSync(process.execPath, [path.resolve(__dirname, '../../scripts/tokenizer/gen-o200k.cjs'), '--check'], { encoding: 'utf8', timeout: 60_000 });
     expect(res.stdout + res.stderr).toContain('o200k.json is current');
     expect(res.status).toBe(0);
-  });
+    // The child takes ~1 s idle but several seconds on a loaded gate host; vitest's own 5 s default killed it first (the flake in #2140),
+    // so the test gets room beyond the child's 60 s spawn limit.
+  }, 90_000);
 
   it('is not built until the first count', () => {
     const script = `
@@ -106,5 +108,5 @@ describe('the packed vocabulary', () => {
     // built, and the packed file is not kept in the module cache afterwards
     expect(out.afterCount).toEqual({ loaded: true, data: false, gpt: false });
     expect(out.n).toBe(oracle('a short note about cold starts'));
-  });
+  }, 60_000);
 });

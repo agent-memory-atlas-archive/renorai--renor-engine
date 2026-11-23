@@ -149,11 +149,12 @@ describe('on POSIX the directory flush is still required (unchanged)', () => {
     });
   }
 
-  it('a real directory fsync still runs and succeeds', async () => {
+  it('the native filesystem accepts the platform-specific directory flush behavior', async () => {
     const dir = tmpDir('posix-fsync-real-');
     const spy = vi.spyOn(fs, 'fsyncSync');
     syncDirectorySync(dir);
-    expect(spy).toHaveBeenCalledTimes(1);
+    // Windows cannot open a directory for reading, so the flush is skipped there (isUnsupportedDirectorySync); POSIX flushes it once.
+    expect(spy).toHaveBeenCalledTimes(process.platform === 'win32' ? 0 : 1);
     await expect(syncDirectory(dir)).resolves.toBeUndefined();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import fs from 'fs';
+import { removeDb } from '../helpers/removeDb';
 import type Database from '../../src/db/sqlite';
 import { openDb } from '../../src/db/client';
 import { runMigrations } from '../../src/db/schema';
@@ -16,9 +16,17 @@ import { tmpPath } from '../helpers/tmpPath';
  * shape of the access, and assert alongside it that the answers are the ones the previous SQL gave.
  */
 const DB = tmpPath('test-read-path-io.db');
+const openDbs: ReturnType<typeof openDb>[] = [];
 afterEach(() => {
-  for (const suffix of ['', '-wal', '-shm']) if (fs.existsSync(DB + suffix)) fs.unlinkSync(DB + suffix);
+  for (const db of openDbs.splice(0)) db.close();
+  removeDb(DB);
 });
+
+function openTestDb() {
+  const db = openDb(DB);
+  openDbs.push(db);
+  return db;
+}
 
 const mmapSize = (db: Database.Database): number => db.pragma('mmap_size', { simple: true }) as number;
 
@@ -38,13 +46,12 @@ function addNote(db: Database.Database, p: string, texts: string[]): number[] {
 
 describe('read path I/O shape', () => {
   it('opens the server database with memory-mapped reads (the vector scan reads every vector page)', () => {
-    const db = openDb(DB);
+    const db = openTestDb();
     expect(mmapSize(db)).toBeGreaterThan(0);
-    db.close();
   });
 
   it('answers a vector search with the same neighbours through the mapping as through plain reads', () => {
-    const db = openDb(DB); runMigrations(db);
+    const db = openTestDb(); runMigrations(db);
     const idx = new VectorIndex(db, 8); idx.initTable();
     // Chunk-sized BLOBs so the scan crosses many overflow pages, as a real index does.
     const [first] = addNote(db, '/v/a.md', ['seed']);
@@ -62,11 +69,10 @@ describe('read path I/O shape', () => {
 
     expect(mapped).toHaveLength(25);
     expect(mapped).toEqual(plain);
-    db.close();
   });
 
   it('does not scan the vector table to find out whether it has any vectors', async () => {
-    const db = openDb(DB); runMigrations(db);
+    const db = openTestDb(); runMigrations(db);
     const idx = new VectorIndex(db, 4); idx.initTable();
     const [id] = addNote(db, '/v/a.md', ['alpha']);
     const embeds: string[] = [];
@@ -89,12 +95,11 @@ describe('read path I/O shape', () => {
     embeds.length = 0;
     expect(await semanticSearch(db, idx, provider, 'q', 3)).toEqual([]);
     expect(embeds).toEqual([]);
-    db.close();
   });
 
   it('ranks and limits inside the FTS subquery before reading chunk text, returning the rows of the full ranking', () => {
     process.env.RENOR_KEYWORD_STEM = '0'; // This test owns the legacy index's exact SQL plan.
-    const db = openDb(DB); runMigrations(db);
+    const db = openTestDb(); runMigrations(db);
     // Many chunks with IDENTICAL text -> identical bm25 scores, written in an order that is not their place order.
     const texts: string[] = [];
     for (let i = 0; i < 40; i++) texts.push('release notes for the billing system');
@@ -132,12 +137,11 @@ describe('read path I/O shape', () => {
     const chunkLookupAt = plan.findIndex(d => /SEARCH c /.test(d));
     expect(sortAt).toBeGreaterThanOrEqual(0);
     expect(chunkLookupAt).toBeGreaterThan(sortAt);
-    db.close();
     delete process.env.RENOR_KEYWORD_STEM;
   });
 
   it('reads no more chunk rows than the page holds when no row is dropped', () => {
-    const db = openDb(DB); runMigrations(db);
+    const db = openTestDb(); runMigrations(db);
     // One chunk per length: with one `billing` each, BM25 is strictly longer-is-worse, so no two rows tie at the page's edge.
     for (let n = 0; n < 1000; n++) addNote(db, `/v/n${n}.md`, [`billing ${'filler '.repeat(n)}`.trim()]);
     const edge = (db.prepare(`SELECT bm25(chunks_fts) AS s FROM chunks_fts WHERE chunks_fts MATCH '"billing"' ORDER BY s LIMIT 101`).all() as Array<{ s: number }>);
@@ -158,11 +162,10 @@ describe('read path I/O shape', () => {
     expect(got.ok).toBe(true);
     expect((got as { results: unknown[] }).results).toHaveLength(10);
     expect(rows).toBeLessThanOrEqual(10 * 10);
-    db.close();
   });
 
   it('prepares each per-hit retrieval statement once per call, not once per hit', async () => {
-    const db = openDb(DB); runMigrations(db);
+    const db = openTestDb(); runMigrations(db);
     const idx = new VectorIndex(db, 4); idx.initTable();
     for (let n = 0; n < 12; n++) {
       const path = `/v/note-${n}.md`;
@@ -180,6 +183,5 @@ describe('read path I/O shape', () => {
 
     expect(seen.filter(sql => /FROM notes WHERE path = \?/.test(sql)).length).toBeLessThanOrEqual(1);
     expect(seen.filter(sql => /FROM facts WHERE subject_entity_id = \?/.test(sql)).length).toBeLessThanOrEqual(1);
-    db.close();
   });
 });

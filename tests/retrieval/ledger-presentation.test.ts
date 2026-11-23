@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   dropLedgerPreamble,
@@ -11,7 +12,7 @@ import { SUPERSEDED_LABEL } from '../../src/retrieval/ledgerLiveness';
 
 const VAULT = { memoryDir: '/v', ledgerRelPath: 'System/Memory Events Ledger.md' };
 const isLedger = ledgerNoteMatcher(VAULT);
-const STORED = '/v/System/Memory Events Ledger.md';
+const STORED = path.resolve(VAULT.memoryDir, 'System/Memory Events Ledger.md');
 
 const HEADER = '# Memory Events Ledger\n\nAppend-only durable record of memory events. Replayed on rebuild.';
 const record = (id: string, fields: Record<string, string>) =>
@@ -42,7 +43,7 @@ describe('which note is the ledger', () => {
 
   it('follows the configured path, and the default path is then just a note', () => {
     const custom = ledgerNoteMatcher({ memoryDir: '/v', ledgerRelPath: 'Records/Mine' }); // ".md" is added, as the ledger writer does
-    expect(custom('/v/Records/Mine.md')).toBe(true);
+    expect(custom(path.resolve(VAULT.memoryDir, 'Records/Mine.md'))).toBe(true);
     expect(custom('Records/Mine.md')).toBe(true);
     expect(custom(STORED)).toBe(false);
     expect(custom('System/Memory Events Ledger.md')).toBe(false);

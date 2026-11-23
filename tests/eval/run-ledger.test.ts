@@ -369,8 +369,8 @@ describe('run ledger: which environment is configuration', () => {
 
 describe('run ledger: the file', () => {
   it('lives beside the eval caches under HOME unless RENOR_EVAL_RUN_LEDGER names another file, and cannot be turned off', () => {
-    expect(resolveRunLedgerPath({ HOME: '/home/example' })).toBe('/home/example/.local/share/renor/eval-run-ledger.jsonl');
-    expect(resolveRunLedgerPath({ HOME: '/home/example', RENOR_EVAL_RUN_LEDGER: '/scratch/ledger.jsonl' })).toBe('/scratch/ledger.jsonl');
+    expect(resolveRunLedgerPath({ HOME: path.resolve('/home/example') }).split(path.sep).join('/')).toBe(path.resolve('/home/example/.local/share/renor/eval-run-ledger.jsonl').split(path.sep).join('/'));
+    expect(resolveRunLedgerPath({ HOME: '/home/example', RENOR_EVAL_RUN_LEDGER: '/scratch/ledger.jsonl' }).split(path.sep).join('/')).toBe(path.resolve('/scratch/ledger.jsonl').split(path.sep).join('/'));
     for (const off of ['off', '0']) expect(() => resolveRunLedgerPath({ RENOR_EVAL_RUN_LEDGER: off })).toThrow(/cannot turn the run ledger off/);
   });
 

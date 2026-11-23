@@ -1,3 +1,4 @@
+import { removeTestDir } from '../helpers/removeDb';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -43,6 +44,7 @@ const saved: Record<string, string | undefined> = {};
 const tmpDirs: string[] = [];
 const servers: Array<{ close: () => Promise<void> }> = [];
 const openCaches: EvidenceCache[] = [];
+const openExtractors: EvidenceExtractor[] = [];
 
 beforeEach(() => {
   for (const name of EVIDENCE_PROVIDER_ENV) {
@@ -60,10 +62,18 @@ afterEach(async () => {
     if (saved[name] === undefined) delete process.env[name];
     else process.env[name] = saved[name];
   }
+  for (const extractor of openExtractors.splice(0)) extractor.close();
   for (const cache of openCaches.splice(0)) cache.close();
   for (const server of servers.splice(0)) await server.close();
-  for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of tmpDirs.splice(0)) removeTestDir(dir);
 });
+
+/** An extractor the way `renor search` builds one; its cache handle is closed in the teardown, before the directory goes. */
+function trackedExtractor(options: ReturnType<typeof resolveEvidenceToolOptions>): EvidenceExtractor | null {
+  const extractor = createEvidenceExtractor(options);
+  if (extractor) openExtractors.push(extractor);
+  return extractor;
+}
 
 function tmpDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-negative-cache-'));
@@ -128,7 +138,7 @@ function productEnv(provider: { baseUrl: string }, dir: string): NodeJS.ProcessE
 async function search(env: NodeJS.ProcessEnv, ws: { dir: string; vault: string; hits: Hit[] }) {
   const options = resolveEvidenceToolOptions({ dbPath: path.join(ws.dir, 'index.db') }, env);
   const attached = await attachSearchEvidence({
-    query: QUERY, hits: ws.hits, vaultPath: ws.vault, options, extractor: createEvidenceExtractor(options), enabled: true,
+    query: QUERY, hits: ws.hits, vaultPath: ws.vault, options, extractor: trackedExtractor(options), enabled: true,
   });
   return productEvidenceReport(attached.evidence);
 }
@@ -216,7 +226,7 @@ describe('a reply the parser rejects is paid for once per request within EVIDENC
 
     const options = resolveEvidenceToolOptions({ dbPath: path.join(ws.dir, 'index.db') }, env);
     const otherQuestion = await attachSearchEvidence({
-      query: 'Where did we go camping?', hits: ws.hits, vaultPath: ws.vault, options, extractor: createEvidenceExtractor(options), enabled: true,
+      query: 'Where did we go camping?', hits: ws.hits, vaultPath: ws.vault, options, extractor: trackedExtractor(options), enabled: true,
     });
     expect(otherQuestion.evidence).not.toHaveProperty('fromCache');
     expect(provider.requests).toHaveLength(6);
@@ -245,7 +255,7 @@ describe('a reply the parser rejects is paid for once per request within EVIDENC
 
     // Another process (or an extraction already in the air) stored a table for this very request meanwhile.
     const options = resolveEvidenceToolOptions({ dbPath: path.join(ws.dir, 'index.db') }, env);
-    const key = createEvidenceExtractor(options)!.cacheKey(QUERY, await loadEvidenceSessionsFromVault(ws.hits, ws.vault));
+    const key = trackedExtractor(options)!.cacheKey(QUERY, await loadEvidenceSessionsFromVault(ws.hits, ws.vault));
     const cache = new EvidenceCache(options.cachePath!);
     openCaches.push(cache);
     cache.put(key, {
@@ -427,7 +437,7 @@ describe('with no evidence model configured nothing changes', () => {
     env.RENOR_EVIDENCE_MODE = 'always';
     const options = resolveEvidenceToolOptions({ dbPath: path.join(ws.dir, 'index.db') }, env);
     expect(options.chat).toBeUndefined();
-    const extractor = createEvidenceExtractor(options);
+    const extractor = trackedExtractor(options);
     expect(extractor).toBeNull();
     for (let i = 0; i < 2; i++) {
       const attached = await attachSearchEvidence({ query: QUERY, hits: ws.hits, vaultPath: ws.vault, options, extractor, enabled: true });

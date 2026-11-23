@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import net from 'net';
+import type { AddressInfo } from 'net';
 import crypto from 'crypto';
 import request from 'supertest';
 import type Database from '../../src/db/sqlite';
@@ -13,7 +13,7 @@ import { chunksWithoutVectors } from '../../src/embeddings/rebuild';
 import { embeddingSpace } from '../../src/embeddings/space';
 import { loadMvpConfig, type MvpConfig } from '../../src/mvp/config';
 import { startMvpService, MVP_MCP_PATH, type MvpApp } from '../../src/mvp/server';
-import { readEmbeddingTableDims, semanticReady } from '../../src/mvp/engine';
+import { readEmbeddingTableDims, runningEmbeddingRebuild, semanticReady } from '../../src/mvp/engine';
 import type { Express } from 'express';
 import { HTTP_SERVER_UNSUPPORTED } from '../helpers/httpServerPlatform';
 
@@ -77,25 +77,14 @@ class CountingHash extends EvalHashEmbeddingProvider {
   }
 }
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const port = (srv.address() as net.AddressInfo).port;
-      srv.close(() => resolve(port));
-    });
-    srv.on('error', reject);
-  });
-}
-
-function mcpConfig(memoryDir: string, port: number): MvpConfig {
+function mcpConfig(memoryDir: string): MvpConfig {
   const authRoot = tmp('backfill-auth-');
   process.env.MVP_MEMORY_DIR = memoryDir;
   process.env.MVP_AUTH_STATE_PATH = path.join(authRoot, 'clients.json');
-  process.env.MVP_BASE_URL = `http://127.0.0.1:${port}`;
+  process.env.MVP_BASE_URL = 'http://127.0.0.1:1';
   process.env.MVP_OWNER_EMAIL = OWNER_EMAIL;
   process.env.MVP_OWNER_PASSWORD = OWNER_PASSWORD;
-  process.env.MVP_PORT = String(port);
+  delete process.env.MVP_PORT;
   process.env.MVP_ALLOWED_CALLBACK_URIS = 'http://127.0.0.1:1/callback';
   delete process.env.MVP_EMBEDDING_PROVIDER;
   delete process.env.EMBEDDING_PROVIDER;
@@ -128,12 +117,14 @@ async function registerAndToken(app: Express): Promise<string> {
 
 /** A started service and an MCP client on it; reads go one at a time (the stateless JSON mode shares one server). */
 async function start(memoryDir: string, provider: EvalHashEmbeddingProvider | null) {
-  const config = mcpConfig(memoryDir, await freePort());
+  // Bind port 0 directly so another worker cannot take the port between a probe and startup.
+  const config = { ...mcpConfig(memoryDir), host: '127.0.0.1', port: 0 };
   const service = await startMvpService(config, provider);
   services.push(service);
+  const { port } = service.httpServer.address() as AddressInfo;
   const client = new Client({ name: 'backfill-test', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(
-    new URL(MVP_MCP_PATH, `http://127.0.0.1:${config.port}`),
+    new URL(MVP_MCP_PATH, `http://127.0.0.1:${port}`),
     { requestInit: { headers: { Authorization: `Bearer ${await registerAndToken(service.app)}` } } },
   ));
   const call = async (name: string, args: Record<string, unknown> = {}) =>
@@ -321,7 +312,11 @@ describe.skipIf(HTTP_SERVER_UNSUPPORTED)('a keyword-only workspace started with 
     const interrupted = await start(memoryDir, first);
     const all = chunkRows(interrupted.service.db);
     expect(all.length).toBe(200);
-    await vi.waitFor(() => expect(first.calls).toBe(4));
+    // Real work, not a timer: four requests of 32 chunks each, on a busy gate host the default 1 s is not enough.
+    await vi.waitFor(() => expect(first.calls).toBe(4), { timeout: 20_000 });
+    // Stop the rebuild BEFORE the held requests are released. close() aborts it only after the client has closed (a round
+    // trip), so releasing at once let the pass finish and start the next one first (calls 5+), depending on timing.
+    runningEmbeddingRebuild(interrupted.service.engine)?.abort();
     const stopping = interrupted.close(); // stops between requests; the two on their way are finished and kept
     first.release();
     await stopping;

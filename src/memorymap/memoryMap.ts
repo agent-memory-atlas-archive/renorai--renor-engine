@@ -4,7 +4,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { hashContent } from '../indexer/hasher';
 import type Database from '../db/sqlite';
-import { parseNote } from '../indexer/parser';
+import { bodyFirstLine, parseNote } from '../indexer/parser';
+import { noteContentHash } from '../indexer/dailyEntries';
 import { isIgnoredByVault } from '../indexer/walker';
 import { indexFile, type IndexOptions } from '../indexer/pipeline';
 import { forgetOrigins } from '../mvp/layeredScope';
@@ -19,6 +20,8 @@ import { dropEvidenceForStems } from '../evidence/evidenceCache';
 import { forgetImportedNotes } from '../importing/forgetImported';
 import { forgetReplacementsOf } from './replacedJournal';
 import { clampSessionDate, createNoteTimeBound, resolveSessionDate } from '../retrieval/orchestrator';
+import { clearTopicCache, memoryTopics, type ListedMemory, type MemoryIndexed, type MemoryTopics, type TopicSource } from './topicStore.js';
+import type { GroupOptions } from './topics.js';
 import { observeEnabled, observationsForExport, purgeRetiredObservations, setObservationRetired, type ObservationExportRow } from '../mvp/observations';
 import { nameIsOpenFile, nameKind } from '../memory/sameFile';
 
@@ -222,6 +225,11 @@ export interface MemoryMap {
   total: { memories: number; things: number; facts: number; links: number; events: number; retired: number };
   /** True when the list holds more than the reply shows. */
   truncated: { memories: boolean; things: boolean; facts: boolean; links: boolean; events: boolean; retired: boolean };
+  /**
+   * Only when asked (MemoryMapOptions.groups): every memory the map holds grouped by meaning into topics and subtopics,
+   * for the dashboard's topic map (topicStore.ts). Null when there are too few memories with vectors for topics.
+   */
+  groups?: MemoryTopics | null;
 }
 
 // ------------------------------- paths --------------------------------------
@@ -741,7 +749,7 @@ async function exists(abs: string): Promise<boolean> {
 
 // ------------------------------- map ----------------------------------------
 
-interface NoteRow { path: string; title: string; modified_at: string; frontmatter_json: string }
+interface NoteRow { path: string; title: string; modified_at: string; frontmatter_json: string; note_hash: string }
 
 interface Collected {
   /** Newest first. */
@@ -752,6 +760,8 @@ interface Collected {
   wikilinks: Map<string, string[]>;
   /** Every memory read, kept or not: what is still live (without `keep`, exactly the memories collected). */
   seen: Set<string>;
+  /** Where each collected entry and note is in the index (the topic map reads its vectors by this). */
+  indexed: Map<string, MemoryIndexed>;
 }
 
 /**
@@ -819,13 +829,14 @@ async function collectMemories(
 ): Promise<Collected> {
   const { db, memoryDir } = ctx;
   const notes = db.prepare(
-    `SELECT path, title, modified_at, frontmatter_json FROM notes ORDER BY modified_at DESC LIMIT ?`,
+    `SELECT path, title, modified_at, frontmatter_json, note_hash FROM notes ORDER BY modified_at DESC LIMIT ?`,
   ).all(MAX_NOTES_SCANNED + 1) as NoteRow[];
 
   const memories: MapMemory[] = [];
   const text = new Map<string, string>();
   const wikilinks = new Map<string, string[]>();
   const seen = new Set<string>();
+  const indexed = new Map<string, MemoryIndexed>();
   const bound = createNoteTimeBound(db);
   let truncated = notes.length > MAX_NOTES_SCANNED;
   const add = (memory: MapMemory, said: string): boolean => {
@@ -866,13 +877,16 @@ async function collectMemories(
 
     if (daily) {
       const { blocks } = parseEntries(rel, read.text);
+      // Where each entry's chunks are in the index: its lines, counted as the indexer counts them (from the body). Only
+      // when the index holds exactly these bytes: in a day changed since it was indexed, a line may be another entry's.
+      const first = !read.truncated && noteContentHash(n.path, read.text) === n.note_hash ? bodyFirstLine(n.path, read.text) : undefined;
       const dated = blocks.map((b) => ({ b, at: entryAt(bound, n.path, daily[2], b, n.modified_at) }));
       const newest = keep ? dated : [...dated].sort((x, y) => y.at.localeCompare(x.at)).slice(0, MAX_ENTRIES_PER_DAY);
       if (newest.length < blocks.length) truncated = true;
       // An entry past the cap was still read, so it is live: a retirement of it that never completed is not listed.
       for (const b of blocks) seen.add(b.id);
       for (const { b, at } of newest) {
-        add({
+        const listed = add({
           id: b.id, kind: 'entry', path: rel,
           title: collapse(b.text, 90),
           at,
@@ -880,6 +894,7 @@ async function collectMemories(
           tags: [], status: null,
           excerpt: collapse(b.text, EXCERPT_CHARS),
         }, b.text);
+        if (listed) indexed.set(b.id, { notePath: n.path, ...(first === undefined ? {} : { lines: b.ranges.map(([s, e]) => [s - first, e - first] as [number, number]) }) });
       }
       if (read.truncated) truncated = true;
       continue;
@@ -896,10 +911,25 @@ async function collectMemories(
       excerpt: collapse(withoutFirstHeading(parsed.body), EXCERPT_CHARS),
     }, `${n.title}\n${parsed.body}`);
     if (kept) wikilinks.set(id, parsed.wikilinks);
+    if (kept) indexed.set(id, { notePath: n.path });
   }
 
   memories.sort((a, b) => b.at.localeCompare(a.at));
-  return { memories, truncated, text, wikilinks, seen };
+  return { memories, truncated, text, wikilinks, seen, indexed };
+}
+
+/** The memories the topic map groups, with the text each is read by and where it is in the index (topicStore.ts). */
+function listedForTopics(memories: MapMemory[], collected: Pick<Collected, 'text' | 'indexed'>): ListedMemory[] {
+  return memories.map((m) => ({
+    id: m.id, kind: m.kind, path: m.path, text: collected.text.get(m.id) ?? m.title, title: m.title, at: m.at, source: m.source,
+    ...collected.indexed.get(m.id),
+  }));
+}
+
+/** Every entry and note the map lists, as the topic map is given them. */
+export async function topicListing(ctx: MemoryMapContext): Promise<ListedMemory[]> {
+  const collected = await collectMemories(ctx);
+  return listedForTopics(collected.memories, collected);
 }
 
 type RetiredMemory = MemoryMap['retired'][number];
@@ -971,6 +1001,8 @@ export interface MemoryMapOptions {
    * what the reply lists. Default DEFAULT_MAP_LIMIT.
    */
   limit?: number;
+  /** Also group every memory into topics (MemoryMap.groups), from the stored vectors `source` reads. */
+  groups?: GroupOptions & { source: Omit<TopicSource, 'db'> };
 }
 
 export async function buildMemoryMap(ctx: MemoryMapContext, options: MemoryMapOptions = {}): Promise<MemoryMap> {
@@ -1144,6 +1176,14 @@ export async function buildMemoryMap(ctx: MemoryMapContext, options: MemoryMapOp
   const links = kept.sort((a, b) => a.seq - b.seq).map((k) => k.link);
   const totalLinks = kindOrder.reduce((sum, k) => sum + linksByKind[k].length, 0);
 
+  const groups = options.groups
+    ? await memoryTopics(
+      { ...options.groups.source, db },
+      listedForTopics(memories, collected),
+      options.groups,
+    )
+    : undefined;
+
   return {
     ok: true,
     generatedAt: new Date().toISOString(),
@@ -1171,6 +1211,7 @@ export async function buildMemoryMap(ctx: MemoryMapContext, options: MemoryMapOp
       events: eventRows.length > MAX_EVENTS || allEvents.length > cap,
       retired: retiredAll.length > retired.length,
     },
+    ...(groups !== undefined ? { groups } : {}),
   };
 }
 
@@ -1837,6 +1878,9 @@ async function purgeRetiredJournal(ctx: MemoryMapContext, target: string, only?:
     })();
     // A daily log is read whole by the evidence pass, so its live entries' extractions go too; the cache asks again.
     if (ctx.evidenceCachePath) dropEvidenceForStems(ctx.evidenceCachePath, [...stems]);
+    // The topic map's names and centres were derived from these memories too: it groups again, and a grouping already
+    // under way does not write back (topicStore.ts, the cache's epoch).
+    clearTopicCache(ctx.db);
 
     // 2. The journal, rewritten atomically: the moment of deletion. Every record of a chosen retirement goes, and so does
     // every ended retirement of the same memory (a restore or a void kept the entry's text); other retirements still in

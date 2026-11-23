@@ -293,6 +293,10 @@ export class EvidenceExtractor {
     this.bounds = opts.bounds ?? {};
   }
 
+  close(): void {
+    this.cache?.close();
+  }
+
   /** The exact prompt the extractor receives for `query` over `sessions`, and the key its table is cached under. */
   private promptAndKey(query: string, sessions: EvidenceSessionInput[]): { prompt: string; key: string } {
     const prompt = renderEvidencePrompt(query, sessions);

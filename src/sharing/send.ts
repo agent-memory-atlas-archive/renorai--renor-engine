@@ -451,7 +451,7 @@ async function shareStream(options: SenderOptions, stream: 'numbers' | 'training
   probe?.close();
   // Debug changes nothing, so it reads the file as it is; a real run first writes what this process counted.
   if (!training && !debug) flushUsageFor(options.dir);
-  let usage: UsageRow[] = training ? [] : usageRows(options.dir, now, sharingInternal(env));
+  let usage: UsageRow[] = training ? [] : usageRows(options.dir, now, sharingInternal(env), options.hosted === true);
   if (!hasLog && usage.length === 0) return empty('no-log', { reason: file === null ? 'no learning log to read' : `no learning log at ${file}` });
 
   // Debug reads the state if there is one and never makes it; a real send makes it on first use.
@@ -463,7 +463,7 @@ async function shareStream(options: SenderOptions, stream: 'numbers' | 'training
     const before = state.secret;
     state = monthlyRotation(options.dir, state, now);
     // A new month also gave the usage file a new install id: read its rows again, so none goes out under last month's.
-    if (state.secret !== before) usage = usageRows(options.dir, now, sharingInternal(env));
+    if (state.secret !== before) usage = usageRows(options.dir, now, sharingInternal(env), options.hosted === true);
   }
   // The text stream starts at the switch-on time, never at 0: nothing created before it is ever sent tied, so nothing sent untied is repeated.
   if (training) {

@@ -8,7 +8,7 @@ import { inReadSnapshot } from '../db/readCache';
 import { listStatement, paddedList, prepareOnce } from '../db/statements';
 import { VectorIndex } from '../embeddings/vectorIndex';
 import { byScoreThenPlace, semanticSearch, type ChunkFilter, type ChunkScope, type RetrievalProbe } from './semantic';
-import { lookupEntity } from './entityLookup';
+import { lookupEntity } from './entityLookup'; import { ENTITY_SIGNAL_BOOST, entitySignalEnabled, entitySignalNotes } from './entitySignal.js'; import { TYPE_ROUTER_BOOST, noteMemoryType, routeQueryType, typeRouterEnabled } from './typeRouter.js';
 import { factsFirstHits } from './factsFirst';
 import { isConversationShaped } from './conversationShape';
 import { CALIBRATED_BARS, embeddingModelKey } from '../mvp/contextRelevance';
@@ -919,6 +919,10 @@ function rankWindow(read: {
   // Raw cosines, kept only for a caller that asked to see them (get_context's relevance signal).
   const cosineByChunk = opts.probe ? new Map(semanticHits.map(h => [h.chunkId, h.score])) : null;
   const entityHit = lookupEntity(db, query.trim());
+  // RENOR_RETRIEVE_ENTITY_SIGNAL (default off): notes holding an entity the question names rank higher (entitySignal.ts).
+  const signalNotes = entitySignalEnabled() ? entitySignalNotes(db, query) : null;
+  // RENOR_RETRIEVE_TYPE_ROUTER (default off): notes of the record kind the question needs rank higher (typeRouter.ts).
+  const routedType = typeRouterEnabled() ? routeQueryType(query) : null;
 
   // Prepared once per call, not once per hit: each of these runs for every semantic hit (dozens per call).
   const noteRowStmt = onceStatement(db, 'SELECT modified_at, frontmatter_json FROM notes WHERE path = ?');
@@ -948,8 +952,10 @@ function rankWindow(read: {
       score += 0.1; reason += '+priority'; if (terms) terms[rankingTermIndex('priority')] += 0.1;
     }
     if (entityHit?.sourceNote === h.notePath) { score += 0.2; reason += '+entity'; if (terms) terms[rankingTermIndex('entity')] += 0.2; }
+    if (signalNotes?.has(h.notePath)) { score += ENTITY_SIGNAL_BOOST; reason += '+entity-signal'; }
     // Time-decay recency: +0.1 for today, linearly decaying to 0 over 30 days.
     const row = noteRow(h.notePath);
+    if (routedType && noteMemoryType(row?.frontmatter_json) === routedType) { score += TYPE_ROUTER_BOOST; reason += '+type-route'; }
     const session_date = resolveSessionDate(row?.frontmatter_json, row?.modified_at);
     if (row) {
       const daysSince = ((clock.nowMs ?? Date.now()) - new Date(row.modified_at).getTime()) / 86400000;

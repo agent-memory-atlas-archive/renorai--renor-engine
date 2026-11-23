@@ -111,9 +111,20 @@ export function parseCaptureReply(
   return { observations, rules };
 }
 
+/** RENOR_CAPTURE_SERVER=0|off|false: the one switch that restores the earlier rule (capture only after an explicit opt-in). */
+export function captureServerSwitchOff(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ['0', 'off', 'false'].includes((env.RENOR_CAPTURE_SERVER ?? '').trim().toLowerCase());
+}
+
+/** The provider capture sends turns to, for docs and memory_status. */
+export function captureProvider(env: NodeJS.ProcessEnv = process.env): string {
+  return ownHwCaptureUrl(env) ? 'own hardware' : 'Anthropic';
+}
+
 /**
- * The workspace's capture settings, or null (capture off). Off unless the slug in RENOR_CAPTURE_SERVER_OPTIN equals MVP_INSTANCE_ID
- * and RENOR_CAPTURE_KEY_FILE names a readable key. Only the process environment and the host's files set these: no MCP tool,
+ * The workspace's capture settings, or null (capture off). On when MVP_INSTANCE_ID is set and RENOR_CAPTURE_KEY_FILE names a readable key,
+ * unless RENOR_CAPTURE_SERVER=0|off|false, which restores the earlier rule: the slug in RENOR_CAPTURE_SERVER_OPTIN must equal MVP_INSTANCE_ID.
+ * An opt-in that names another workspace keeps capture off either way. Only the process environment and the host's files set these: no MCP tool,
  * gateway field or request body can reach them. Invalid caps switch capture off rather than falling back to a larger cap.
  */
 export function captureServerConfig(env: NodeJS.ProcessEnv = process.env, opts: { quiet?: boolean } = {}): CaptureConfig | null {
@@ -121,9 +132,21 @@ export function captureServerConfig(env: NodeJS.ProcessEnv = process.env, opts: 
   const say = (line: string): void => { if (!opts.quiet) process.stderr.write(line); };
   const workspace = (env.MVP_INSTANCE_ID ?? '').trim().toLowerCase();
   const opted = (env.RENOR_CAPTURE_SERVER_OPTIN ?? '').trim().toLowerCase();
-  if (!opted || !workspace || opted !== workspace) {
-    if (opted) say('[capture] RENOR_CAPTURE_SERVER_OPTIN does not match MVP_INSTANCE_ID: capture stays off\n');
-    return null;
+  if (captureServerSwitchOff(env)) {
+    // The off switch: exactly the earlier behaviour, an explicit per-workspace opt-in is required.
+    if (!opted || !workspace || opted !== workspace) {
+      if (opted) say('[capture] RENOR_CAPTURE_SERVER_OPTIN does not match MVP_INSTANCE_ID: capture stays off\n');
+      return null;
+    }
+  } else {
+    // Default on: a workspace with a capture key is captured. Nothing happens without a key (the common self-hosted case, silent);
+    // an explicit opt-in that names another workspace still keeps capture off.
+    if (!workspace) return null;
+    if (opted && opted !== workspace) {
+      say('[capture] RENOR_CAPTURE_SERVER_OPTIN does not match MVP_INSTANCE_ID: capture stays off\n');
+      return null;
+    }
+    if (!opted && !env.RENOR_CAPTURE_KEY_FILE) return null;
   }
   if (!env.RENOR_CAPTURE_KEY_FILE) {
     say('[capture] RENOR_CAPTURE_KEY_FILE is unset: capture stays off\n');
@@ -132,6 +155,10 @@ export function captureServerConfig(env: NodeJS.ProcessEnv = process.env, opts: 
   let key = '';
   try { key = fs.readFileSync(env.RENOR_CAPTURE_KEY_FILE, 'utf8').trim(); } catch {
     say('[capture] RENOR_CAPTURE_KEY_FILE cannot be read: capture stays off\n');
+    return null;
+  }
+  if (!key && !(env.RENOR_CAPTURE_OWN_HW_URL ?? '').trim()) {
+    say('[capture] RENOR_CAPTURE_KEY_FILE is empty: capture stays off\n');
     return null;
   }
   const maxUsdCall = env.RENOR_CAPTURE_MAX_USD_CALL === undefined ? CAPTURE_MAX_USD_CALL_DEFAULT : Number(env.RENOR_CAPTURE_MAX_USD_CALL);

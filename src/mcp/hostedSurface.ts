@@ -10,6 +10,18 @@ export function legacyStdio(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.RENOR_MCP_LEGACY_STDIO?.trim() === '1';
 }
 
+/**
+ * Whether the stdio server lists the short coding set. Explicit `coding` always does; `all` or any other list never does.
+ * With the variable unset or blank it is the default (the lab result: 47% fewer tokens per session, no accuracy change),
+ * except under RENOR_MCP_LEGACY_STDIO=1 (today's list, byte for byte) and for a named connection, whose hive tools
+ * (ask_agent and the rest) are the reason it has a name and stay listed. Everything hidden stays callable by name.
+ */
+export function stdioCodingList(env: NodeJS.ProcessEnv, named: boolean): boolean {
+  const tools = env.RENOR_MCP_TOOLS?.trim();
+  if (tools) return tools === 'coding';
+  return !legacyStdio(env) && !named;
+}
+
 /** What `RENOR_MCP_TOOLS=coding` lists by default on stdio: the hosted coding set, less whats_new. */
 export const HOSTED_STDIO_CODING_TOOLS = ['get_context', 'search_text', 'retrieve_memory', 'remember'] as const;
 

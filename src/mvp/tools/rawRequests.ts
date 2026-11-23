@@ -27,7 +27,7 @@ export function registerRawRequestHandlers(ctx: ToolContext): void {
       return { text: index.text, tokens: index.tokens, omitted: index.omitted };
     });
   }
-  // Owner requires the write-side eval to win first; #1441 owns the default flip.
+  // On by default (owner rule); RENOR_OBSERVE=0|off|false|no leaves this handler unregistered, exactly as before.
   if (observeEnabled()) {
     startObservationIdleSweep(db, path.resolve(config.memoryDir));
     server.server.setRequestHandler(ObserveRequestSchema, async request => {

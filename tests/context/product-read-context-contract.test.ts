@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { removeTestDir } from '../helpers/removeDb';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import os from 'os';
@@ -38,14 +39,25 @@ import { PRODUCT_RUNTIME_FIELD_ALLOWLIST, GOLD_RUNTIME_FIELD_NAMES } from '../..
  */
 
 const tmpDirs: string[] = [];
+const dbs: ReturnType<typeof openDb>[] = [];
+
+function openTestDb(dbPath: string) {
+  const db = openDb(dbPath);
+  dbs.push(db);
+  return db;
+}
 function mkTempDir(prefix = 'lane5-read-contract-'): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tmpDirs.push(dir);
   return dir;
 }
 
+// The evidence pass is not under test: left on, createServer opens an evidence-cache.db nobody closes.
+beforeEach(() => { process.env.RENOR_SEARCH_EVIDENCE = '0'; });
+
 afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  for (const db of dbs.splice(0)) if (db.open) db.close();
+  for (const dir of tmpDirs.splice(0)) removeTestDir(dir);
   delete process.env[READ_HONESTY_FLAG];
   delete process.env.RENOR_SEARCH_EVIDENCE;
 });
@@ -137,7 +149,7 @@ function stubProvider() {
 
 /** The shipped HTTP read surface over an already-indexed product DB. */
 function httpRead(vault: SeededVault, query: string) {
-  const db = openDb(vault.dbPath);
+  const db = openTestDb(vault.dbPath);
   runMigrations(db);
   const provider = stubProvider();
   const vectorIndex = new VectorIndex(db, provider.dimensions);
@@ -176,7 +188,7 @@ describe('LANE 5: the answer context carries nothing the public surface did not 
     const GOLD_LEAK = 'GOLDLEAK4';
     const GHOST_SESSION = 'GHOSTSESSION2';
 
-    const db = openDb(vault.dbPath);
+    const db = openTestDb(vault.dbPath);
     runMigrations(db);
     const at = '2026-01-20T00:00:00.000Z';
 
@@ -509,7 +521,7 @@ describe('LANE 5: the public entry points agree with the internal helper path', 
       .toEqual(viaHelper.hits.map((h) => path.basename(h.notePath)));
     // Exactly that tail: the helper's stored path below the vault, the form the hosted tools print.
     expect(cliBody.hits.map((h: { notePath: string }) => h.notePath))
-      .toEqual(viaHelper.hits.map((h) => path.relative(vault.root, h.notePath)));
+      .toEqual(viaHelper.hits.map((h) => path.relative(vault.root, h.notePath).split(path.sep).join('/')));
     expect(cliBody.hits.every((h: { session_date?: string }) => typeof h.session_date === 'string')).toBe(true);
   }, 180_000);
 

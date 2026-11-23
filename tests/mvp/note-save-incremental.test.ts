@@ -1,3 +1,4 @@
+import { removeTestDir } from '../helpers/removeDb';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import fs from 'fs';
 import fsp from 'fs/promises';
@@ -54,7 +55,12 @@ const tmpDirs: string[] = [];
 const services: Array<MvpApp & { httpServer: import('http').Server }> = [];
 const dbs: Database.Database[] = [];
 
+// The evidence pass is not under test here: left on, each service opens an evidence-cache.db that its owner never closes.
+const EVIDENCE_BEFORE = process.env.RENOR_SEARCH_EVIDENCE;
+beforeEach(() => { process.env.RENOR_SEARCH_EVIDENCE = '0'; });
+
 afterEach(async () => {
+  if (EVIDENCE_BEFORE === undefined) delete process.env.RENOR_SEARCH_EVIDENCE; else process.env.RENOR_SEARCH_EVIDENCE = EVIDENCE_BEFORE;
   vi.restoreAllMocks();
   while (services.length) {
     const s = services.pop()!;
@@ -63,7 +69,7 @@ afterEach(async () => {
     await s.close();
   }
   while (dbs.length) dbs.pop()!.close();
-  for (const d of tmpDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of tmpDirs.splice(0)) removeTestDir(d);
   delete process.env.RENOR_NEWEST_FIRST;
 });
 
@@ -240,11 +246,11 @@ describe('a note save sees what happened to the vault outside the engine, as a f
     const ws = await workspace(8);
     await saveNote(ws, 'First save: the engine now knows every file.');
     expect(fts(ws, 'zebrafish')).toHaveLength(0);
-    expect(fts(ws, 'Seed note 2 ').map((h) => h.notePath)).toEqual([path.join('Notes', 'topic-002.md')]);
+    expect(fts(ws, 'Seed note 2 ').map((h) => h.notePath)).toEqual(['Notes/topic-002.md']);
 
     fs.writeFileSync(notesDir(ws, 'topic-002.md'), '# Topic 2\n\nA note about zebrafish migrations.\n');
     await saveNote(ws, 'Second save, after an edit made outside the engine.');
-    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual([notesDir(ws, 'topic-002.md')].map((f) => path.relative(ws.memoryDir, f)));
+    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual([notesDir(ws, 'topic-002.md')].map((f) => path.relative(ws.memoryDir, f).split(path.sep).join('/')));
     expect(fts(ws, 'Seed note 2 ')).toHaveLength(0);
     expect(await vectorsMatchText(ws)).toBe(true);
     await expectFullPassToFindNothing(ws);
@@ -262,11 +268,11 @@ describe('a note save sees what happened to the vault outside the engine, as a f
   it('a renamed note is found under its new path by the next save, as a full pass would find it', async () => {
     const ws = await workspace(5);
     await saveNote(ws, 'First save.');
-    expect(fts(ws, 'Seed note 3 ').map((h) => h.notePath)).toEqual([path.join('Notes', 'topic-003.md')]);
+    expect(fts(ws, 'Seed note 3 ').map((h) => h.notePath)).toEqual(['Notes/topic-003.md']);
     fs.renameSync(notesDir(ws, 'topic-003.md'), notesDir(ws, 'renamed-quokka.md'));
     const saved = await saveNote(ws, 'Second save, after a rename made outside the engine.');
     expect(saved.errors).toBe(0);
-    expect(fts(ws, 'Seed note 3 ').map((h) => h.notePath)).toContain(path.join('Notes', 'renamed-quokka.md'));
+    expect(fts(ws, 'Seed note 3 ').map((h) => h.notePath)).toContain('Notes/renamed-quokka.md');
     await expectFullPassToFindNothing(ws);
   });
 
@@ -416,12 +422,12 @@ describe('a note save checks the files it wrote, not the vault', () => {
     fs.writeFileSync(notesDir(ws, 'topic-002.md'), '# Topic 2\n\nA note about zebrafish migrations.\n');
     await saveNote(ws, 'Second save, after an edit made outside the engine.');
     expect(fts(ws, 'zebrafish')).toHaveLength(0);
-    expect(fts(ws, 'Seed note 2 ').map((h) => h.notePath)).toEqual([path.join('Notes', 'topic-002.md')]);
+    expect(fts(ws, 'Seed note 2 ').map((h) => h.notePath)).toEqual(['Notes/topic-002.md']);
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     await engineIndex(ws.db, ws.config, ws.engine);
     log.mockRestore();
-    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual([path.join('Notes', 'topic-002.md')]);
+    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual(['Notes/topic-002.md']);
     expect(fts(ws, 'Seed note 2 ')).toHaveLength(0);
     await expectFullPassToFindNothing(ws);
   });
@@ -440,7 +446,7 @@ describe('a note save checks the files it wrote, not the vault', () => {
     const statCalls = stat.mock.calls.length;
     stat.mockRestore();
     expect(statCalls).toBeGreaterThanOrEqual(40); // the walk stats every note
-    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual([path.join('Notes', 'topic-002.md')]);
+    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual(['Notes/topic-002.md']);
   });
 
   it('a clock that steps back is not a recent check: the next save walks the vault and sees the edit', async () => {
@@ -451,7 +457,7 @@ describe('a note save checks the files it wrote, not the vault', () => {
     fs.writeFileSync(notesDir(ws, 'topic-003.md'), '# Topic 3\n\nA note about zebrafish migrations.\n');
     vi.setSystemTime(Date.now() - 20_000); // before the last check: not an age the window can vouch for
     await saveNote(ws, 'A save after the clock stepped back.');
-    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual([path.join('Notes', 'topic-003.md')]);
+    expect(fts(ws, 'zebrafish').map((h) => h.notePath)).toEqual(['Notes/topic-003.md']);
   });
 
   it('on a 500-note vault a save stats two files and never loads the list of note paths', async () => {
@@ -752,13 +758,16 @@ describe.skipIf(HTTP_SERVER_UNSUPPORTED)('a fact-mode save indexes what changed 
     const seedConfig = mcpConfig(memoryDir, await freePort());
     fs.mkdirSync(path.dirname(seedConfig.dbPath), { recursive: true });
     const seedDb = openDb(seedConfig.dbPath);
-    runMigrations(seedDb);
-    for (let i = 0; i < events; i++) {
-      await remember(seedDb, memoryDir, seedConfig.ledgerRelPath, {
-        subject: `Seed ${i % 50}`, predicate: 'status', object: `state ${i}`, statement: `Seeded statement number ${i}.`,
-      });
+    try {
+      runMigrations(seedDb);
+      for (let i = 0; i < events; i++) {
+        await remember(seedDb, memoryDir, seedConfig.ledgerRelPath, {
+          subject: `Seed ${i % 50}`, predicate: 'status', object: `state ${i}`, statement: `Seeded statement number ${i}.`,
+        });
+      }
+    } finally {
+      seedDb.close();
     }
-    seedDb.close();
     const provider = new StubProvider();
     const { started, config } = await startMvpServiceOnFreePort((port) => mcpConfig(memoryDir, port), provider);
     services.push(started);

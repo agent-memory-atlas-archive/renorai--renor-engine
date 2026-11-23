@@ -2,7 +2,7 @@ import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OwnerOAuthProvider, ownerLoginRouter } from './auth';
 import Database from '../db/sqlite';
-import { type Engine, type EngineDigests, attachEngine, engineRebuildEmbeddings, hasIndexWorkToFinish, engineFinishIndexInBackground, runningEmbeddingRebuild, runningBackgroundIndex, resolveEngineDigests, engineIndexChanged, engineRememberNote, engineIndex } from './engine';
+import { type Engine, type EngineDigests, attachEngine, engineRebuildEmbeddings, hasIndexWorkToFinish, engineFinishIndexInBackground, runningEmbeddingRebuild, runningBackgroundIndex, resolveEngineDigests, engineIndexChanged, engineRememberNote, engineIndex, engineSearchText } from './engine';
 import { IdleMonitor } from './idle';
 import { reindexPending, removeRowsOutsideRoot, clearReindexPending } from '../indexer/outsideRoot';
 import { type Dreamer, createDreamer } from '../memory/dreamer/dreamer';
@@ -689,6 +689,12 @@ export function createMvpApp(config: MvpConfig, engineOverride?: EmbeddingProvid
     stateDir: path.dirname(config.authStatePath),
     saveNote: async (text, date) => { await engineRememberNote(config, text, date, CAPTURE_SOURCE); },
     saveRule: captureRuleSaver(db, config.memoryDir, config.ledgerRelPath),
+    findNeighbors: async texts => {
+      const words = [...new Set(texts.join(' ').toLowerCase().match(/[a-z0-9]{4,}/g) ?? [])].slice(0, 12);
+      if (words.length === 0) return [];
+      const found = engineSearchText(db, config.memoryDir, texts.join(' '), 6, undefined, false, config.ledgerRelPath, undefined, words.map(w => `"${w}"`).join(' OR '));
+      return (found.results as Array<{ text?: unknown }>).map(r => (typeof r.text === 'string' ? r.text : '')).filter(Boolean);
+    },
   });
   app.post('/internal/capture-turns', (req: express.Request, res: express.Response, next: () => void) => {
     if (!isLocalDirectCall(req)) return void res.status(404).json({ error: 'not found' });

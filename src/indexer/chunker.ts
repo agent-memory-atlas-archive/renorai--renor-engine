@@ -167,9 +167,9 @@ function splitByHeadings(lines: string[], offset: number, initial: string[]): { 
   let start = 0;
 
   for (let i = 0; i < lines.length; i++) {
-    const h1 = lines[i].match(/^#\s+(.+)$/);
-    const h2 = !h1 ? lines[i].match(/^##\s+(.+)$/) : null;
-    const h3 = !h1 && !h2 ? lines[i].match(/^###\s+(.+)$/) : null;
+    const h1 = lines[i].match(/^#\s+(.+?)\r?$/);
+    const h2 = !h1 ? lines[i].match(/^##\s+(.+?)\r?$/) : null;
+    const h3 = !h1 && !h2 ? lines[i].match(/^###\s+(.+?)\r?$/) : null;
     if (h1 || h2 || h3) {
       if (buf.length) sections.push({ headingPath: stack.join(' > '), lines: buf, startLine: offset + start, endLine: offset + i });
       before = stack;
@@ -193,7 +193,7 @@ interface Para {
 }
 
 function splitByParagraphs(text: string, headingPath: string, notePath: string, base: number, max: number, overlapTokens: number = 0): Chunk[] {
-  const paras: Para[] = text.split(/\n\n+/).flatMap(p =>
+  const paras: Para[] = text.split(/(?:\r?\n){2,}/).flatMap(p =>
     (p.length > ONE_CHUNK_CHARS
       ? splitOversized(p, max).map((piece, i): Para => ({ text: piece, sep: i === 0 ? '\n\n' : '' }))
       : [{ text: p, sep: '\n\n' }]));

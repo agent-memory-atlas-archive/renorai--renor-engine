@@ -37,6 +37,13 @@
  *   7. Personal identifiers follow the owner's decision of 2026-10-13 ("guard option b"): a card needs a real issuer prefix and
  *      length, a phone number must be written like one (a "+", a bracketed area code or separated groups, never a bare run of
  *      digits), national ids stay, and email addresses are no longer refused.
+ *   8. A git object name and a list of plain numbers are not secrets (2026-11-13, issue 1938, the server agent's first
+ *      complaint). A hex string of exactly 7 to 12, 40 or 64 characters said next to a git word (commit, sha, head, merged,
+ *      branch, tag, a GitHub or GitLab URL) on the same line is a commit, not a key, after a cue word or after a key word; with
+ *      no git word near it, it is judged as the value it is, so "the api key is <40 hex>" is still refused. A bare run of digit
+ *      groups with no "+" and no bracketed area code is a list, not a phone number, when the groups are spaced and all the same
+ *      length ("PRs 1937 1938 1936") or a list word introduces them ("issues 101 1002 1003") and no phone word is near. A phone
+ *      number keeps its uneven groups (415 555 0132, 0800 123 4567) and a dashed or dotted run is unchanged.
  *
  * It answers one question: does this text look like it carries a secret? The answer is a class and a
  * rule label taken from the table below, never text from the input, so a caller can say what it found
@@ -61,6 +68,20 @@ export interface SecretFinding {
   /** A label from SECRET_RULES: fixed text, never part of the scanned input. */
   rule: string;
   class: SecretClass;
+  /**
+   * The shape of the part that matched, so a caller can say WHICH part looked like a secret without repeating any of it:
+   * every letter and digit is a bullet and only the separators between them are kept ("•••••••• •• •••••••"). It carries
+   * no character of the value (maskMatch).
+   */
+  masked: string;
+  /**
+   * Where that part starts, counted in UTF-16 code units from 0, in the text as the scanner reads it (foldForScan, and
+   * joinSplitKeys for a key a line break broke in two). That is the index in the stored text for every text whose folded
+   * copy is the same length, which is all but exotic Unicode.
+   */
+  at: number;
+  /** How long that part is, in the same units: the mask is capped, this is not. */
+  length: number;
 }
 
 export interface SecretRule {
@@ -74,7 +95,8 @@ export interface SecretRule {
   /** The rule only runs on text that also matches this (a gate, not part of the match). */
   needs?: RegExp;
   /** Reject a match with the shape of a secret but not its content (a failed check sum, a date, no scheme). */
-  accept?: (match: string, text: string, at: number) => boolean;
+  accept?: (match: string, text: string, at: number) => boolean | { at: number; length: number };
+  // (An object is accepted too: the span the finding points at, when it is not the whole match.)
   /** Also runs on the copy with a line break or space removed inside a key (joinSplitKeys). Provider prefixes only. */
   split?: boolean;
 }
@@ -352,24 +374,31 @@ function valueLooksSecret(raw: string, cue: string, rest = ''): boolean {
  * "password: ${DB_PASSWORD} then Zq8Lm2Vn7Rt4" states a secret after a template. The tokens that follow it on the same line are judged as values too, the first twelve of
  * them, and a template or call that a space cut in two ends at its closing delimiter ("$(vault read db) Zq8Lm2" starts after the ")").
  */
-function tailLooksSecret(value: string, rest: string, cue: string): boolean {
-  if (!isStandIn(value, rest)) return false; // a plain word ("password is stored in Vault") is a statement; the tokens after it are prose
+function tailLooksSecret(value: string, rest: string, cue: string): { start: number; length: number } | null {
+  if (!isStandIn(value, rest)) return null; // a plain word ("password is stored in Vault") is a statement; the tokens after it are prose
   let after = rest;
+  let afterAt = 0;
   for (const form of unwrapped(value)) {
     const w = form.replace(/^["'`]+|["'`,;.]+$/g, '');
     const t = TEMPLATE_OPEN.find(o => o.open.test(w));
     if (!t) continue;
     const end = rest.indexOf(t.close);
-    after = end < 0 ? '' : rest.slice(end + t.close.length);
+    afterAt = end < 0 ? rest.length : end + t.close.length;
+    after = rest.slice(afterAt);
     break;
   }
   // The tail is judged as a value after the same cue: after a password cue it can be a short word and number, a symbol or six digits.
-  return after.split(/\s+/).filter(Boolean).slice(0, 12).some(tok => {
-    const t = tok.replace(/^[:=/,]+/, '');
+  // The span returned is the token that reads as a secret (offsets in `rest`), so a refusal points at it and not at the placeholder before it.
+  let seen = 0;
+  for (const tm of after.matchAll(/\S+/gu)) {
+    if (++seen > 12) break;
+    const lead = tm[0].match(/^[:=/,]+/)?.[0].length ?? 0;
+    const t = tm[0].slice(lead);
     const assignment = t.match(/^([A-Za-z_][\w.-]*)=/); // NAME=value carries its own cue word; it is not the value of this one
-    if (assignment && ENV_NAME.test(assignment[1])) return false;
-    return valueLooksSecret(t, cue);
-  });
+    if (assignment && ENV_NAME.test(assignment[1])) continue;
+    if (t.length > 0 && valueLooksSecret(t, cue)) return { start: afterAt + tm.index + lead, length: t.length };
+  }
+  return null;
 }
 
 /**
@@ -407,6 +436,75 @@ const CUE_AT_START = new RegExp(`^${CUE_WORDS}`, 'iu');
 /** The value of a cue match: what follows the connector, up to the first space, comma or semicolon. */
 const CUE_VALUE = new RegExp(`^${CUE_WORDS}[\\p{L} \\t_'\u2019-]{0,80}?(?:(?<![\\p{L}\\p{N}])(?:is|are|é)(?![\\p{L}\\p{N}])|["'\`]?\\s*[:=])\\s*((?:[^\\s,;]|[,;])+)$`, 'iu');
 const cueValue = (m: string) => m.match(CUE_VALUE)?.[1] ?? '';
+// ----------------------------------------------------------------------------- git object names and lists of plain numbers
+// 2026-11-13 (issue 1938, the server agent's first complaint): an agent that writes down what it merged had its saves refused.
+// A git object name after a cue word ("the token is 71f2a18...") read as a secret, and a list of pull request numbers
+// ("PRs 1937 1938 1936") read as a phone number. Neither is a secret, and both are what an agent writes every day.
+
+/** A git object name: a short hash (7 to 12 hex), a SHA-1 (40) or a SHA-256 (64). */
+const GIT_HEX = /^(?:[0-9a-f]{7,12}|[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+/**
+ * The git words that clear a cue-word match, and only when they sit directly against the value: "commit 71f2a18", "sha: 71f2a18",
+ * "commit hash is 71f2a18", or a GitHub/GitLab "/commit/71f2a18" URL. A git word elsewhere on the line clears nothing: "my password is
+ * deadbeef12 (rev 2)" and "the api key is <40 hex> for the merge job" are credentials. Bare "git", "tag", "head", "branch" and "rev"
+ * are left out on purpose: "my git token is ..." and "the tag secret is ..." name a credential, not a commit.
+ */
+const GIT_REF_BEFORE = /(?<![\p{L}\p{N}])(?:commit|commits|sha\d*|hash|merge|merged|merging|revision|cherry-pick)(?:[\s:=]+(?:is|at|of))?[\s:=]*$|(?:github|gitlab)\.com\/\S*\/commits?\/$/iu;
+
+/**
+ * The same, for a value that follows a cue word (review of #1940): there the git word may sit inside the cue's own description
+ * ("my password for merge is X", "the api key hash is X"), and a bare "merge" or "hash" there names the credential, not a commit.
+ * Only a word that is a commit by itself clears it: "commit", "sha", "revision", "cherry-pick", or "commit hash", directly against the value.
+ * No "is/at/of" tail and no ":" or "=" connector (a connector after the git word ends the cue's own description, review of #1940, round 3): "my password for commit is X", "the api key sha is X" and "my password for the commit hash is X" end the cue's own description (review of #1940).
+ */
+const GIT_REF_BEFORE_CUE = /(?<![\p{L}\p{N}])(?:(?:commit|commits|sha\d*|revision|cherry-pick)[\s]+hash|(?:commit|commits|sha\d*|revision|cherry-pick))\s*$|(?:github|gitlab)\.com\/\S*\/commits?\/$/iu;
+
+/** The start of the line holding position `at`, looked for no further back than `window` characters (never quadratic on a long line). */
+function lineStartNear(text: string, at: number, window: number): number {
+  const floor = Math.max(0, at - window);
+  return floor + text.slice(floor, at).lastIndexOf('\n') + 1;
+}
+
+/**
+ * Is `value` a git object name with a git word directly before it ("merged at commit 71f2a18...")? Then it is a commit, not a key.
+ * A hex string of any other length, or one with a git word only somewhere else on the line, is judged as the value it is.
+ */
+function looksLikeGitRef(value: string, text: string, valueStart: number, before: RegExp = GIT_REF_BEFORE): boolean {
+  const v = value.replace(LEAD_MARK, '').replace(TRAIL_MARK, '');
+  if (!GIT_HEX.test(v)) return false;
+  return before.test(text.slice(Math.max(0, valueStart - 48), valueStart));
+}
+
+/** Words that introduce a list of numbers (never a phone number): "PRs 1937 1938 1936", "issues 101 1002 1003". */
+const LIST_CUE = /(?<![\p{L}\p{N}])(?:prs?|pull requests?|issues?|tickets?|queue|builds?|runs?|commits?)\P{L}{0,3}$/iu;
+/** Words that say the digits after them are a phone number. "number" is not one: "PR numbers: 1861 1849 1788" is a list. */
+const PHONE_WORD_CUE = /(?<![\p{L}\p{N}])(?:phone|telephone|tel|mobile|cell|cellular|whatsapp|fax|sms|dial|call|calls|called|ring|contact|reach|telefone|celular|ligar|fone|ramal)(?![\p{L}\p{N}])/iu;
+
+/**
+ * A bare run of digit groups (no "+", no bracketed area code) is a phone number only when it is written like one. A list of
+ * plain numbers is not: three or more groups of the SAME length separated by spaces ("1937 1938 1936"), or any spaced run
+ * introduced by a list word ("issues 101 1002 1003"). A phone number keeps its usual uneven groups (415 555 0132,
+ * 0800 123 4567, 020 7946 0958), and a phone word before the digits always wins.
+ */
+function numberListNotPhone(match: string, text: string, at: number): boolean {
+  const m = foldSeparators(match);
+  if (/[.-]/.test(m)) return false; // only the spaced form: a dashed or dotted run stays a phone number, as it was
+  const before = text.slice(Math.max(lineStartNear(text, at, 64), at - 32), at);
+  // A phone word anywhere earlier on the line (up to 64 characters back) wins: "Call the support line for issues 020 7946 0958".
+  if (PHONE_WORD_CUE.test(text.slice(lineStartNear(text, at, 64), at))) return false;
+  const groups = m.split(/\s+/).filter(Boolean);
+  if (groups.length >= 3 && groups[0].length >= 3 && groups.every(g => g.length === groups[0].length)) return true;
+  if (!LIST_CUE.test(before)) return false;
+  // A list word does not clear a run laid out like a phone number: "run 415 555 0132" (3-3-4), "0800 123 4567" (4-3-4),
+  // "issues 020 7946 0958" (3-4-4 with a trunk 0, the common UK layout; "issues 101 1002 1003" stays a list).
+  // Ticket, issue and run numbers never start with a zero, so a leading-zero group is a trunk prefix ("billing issues 02 5550 0123").
+  if (groups.some(g => g.startsWith('0'))) return false;
+  const shape = groups.map(g => g.length).join('-');
+  // "138 1234 5678" (3-4-4 with a 1[3-9]x mobile prefix, the Chinese layout) is a phone number; "issues 101 1002 1003" stays a list.
+  return shape !== '3-3-4' && shape !== '4-3-4' && !(shape === '3-4-4' && /^1[3-9]\d$/.test(groups[0]));
+}
+
 /** The value of a connector-less cue match: the token after the cue word. */
 /** The rest of the line after position `from`, capped: where a template that a space cut in two closes. */
 const restOfLine = (text: string, from: number) => text.slice(from, from + 300).split('\n')[0];
@@ -416,6 +514,33 @@ const bareValue = (m: string) => m.match(/[^\s,;]+$/u)?.[0] ?? '';
  * Walked in this order and the first accepted match wins, so a text that holds a credential and an
  * identifier is a credential. `\w` is written as its Unicode class because the measured scanner's was.
  */
+/**
+ * A word that says a line is about a phone number: "liga", "ligue", "telefone", "telemóvel", "zap", "whatsapp", "llama", "móvil",
+ * "appelle", "handy", "ruf", "call", "phone", "mobile", "cell", "tel", "número"/"numero"/"numéro" and "my number" (the bare word
+ * "number" is not a cue: "ticket number 123 456 789" is a ticket).
+ */
+const PHONE_CUE = /(?<![\p{L}\p{N}])(?:call(?:s|ed|ing)?|phone|mobile|cell(?:phone)?|tel|telefone|telefono|teléfono|telemóvel|telemovel|celular|zap|whats?app|liga|ligue|ligar|llama|llámame|llamar|móvil|movil|appelle|appelez|portable|handy|ruf|rufe|anruf(?:en)?|zadzwoń|dzwoń|n[uú]mero|num[ée]ro|nummer|my number|mi n[uú]mero|meu n[uú]mero|mon num[ée]ro|meine nummer)(?![\p{L}\p{N}])/iu;
+
+/**
+ * Whether the line holding offset `at` has a phone word. The answer is kept for the last line looked at, so a line of many
+ * ambiguous numbers is searched once, not once per number (the scan stays linear). Matches arrive in increasing offset order.
+ */
+let cueText = '';
+let cueStart = -1;
+let cueEnd = -1;
+let cueResult = false;
+function lineHasPhoneCue(text: string, at: number): boolean {
+  if (text === cueText && at >= cueStart && at < cueEnd) return cueResult;
+  const start = text.lastIndexOf('\n', at - 1) + 1;
+  const nl = text.indexOf('\n', at);
+  const end = nl < 0 ? text.length : nl;
+  cueText = text;
+  cueStart = start;
+  cueEnd = end + 1;
+  cueResult = PHONE_CUE.test(text.slice(start, end));
+  return cueResult;
+}
+
 export const SECRET_RULES: readonly SecretRule[] = [
   // Provider-shaped keys. OpenAI sk-/sk-proj- and Anthropic sk-ant- are one shape (sk-, then a long run).
   { id: 'api-key', class: 'credential', re: /sk-[A-Za-z0-9_-]{20,}/gu, accept: providerTail(3, true), split: true },
@@ -468,7 +593,10 @@ export const SECRET_RULES: readonly SecretRule[] = [
     re: new RegExp(`${CUE}[\\p{L} \\t_'\u2019-]{0,80}?(?:(?<![\\p{L}\\p{N}])(?:is|are|é)(?![\\p{L}\\p{N}])|["'\`]?\\s*[:=])\\s*(?:[^\\s,;]|[,;](?=\\S))+`, 'giu'),
     accept: (m, text, at) => {
       const value = cueValue(m), cue = m.match(CUE_AT_START)?.[0] ?? '', rest = restOfLine(text, at + m.length);
-      return valueLooksSecret(value, cue, rest) || tailLooksSecret(value, rest, cue);
+      if (looksLikeGitRef(value, text, at + m.length - value.length, GIT_REF_BEFORE_CUE)) return false; // "merged at commit 71f2a18...": a git object name, not a key
+      if (valueLooksSecret(value, cue, rest)) return true;
+      const tail = tailLooksSecret(value, rest, cue);
+      return tail === null ? false : { at: at + m.length + tail.start, length: tail.length }; // the span of the credential after the placeholder
     },
   },
   // A password spoken with its separators ("granite dash violet dash zephyr 1586"): nothing else in prose reads like this.
@@ -510,6 +638,7 @@ export const SECRET_RULES: readonly SecretRule[] = [
       const near = text.slice(Math.max(lineStart, at - 16), at);
       if (/^[0-9a-f]{32,128}$/i.test(tok)) {
         if (tok.length === 40) return false; // a SHA-1 or a git commit
+        if (tok.length === 64 && GIT_REF_BEFORE.test(before)) return false; // a SHA-256 object name said next to a git word
         return entropy(tok) >= 3 && /(?:key|token|secret|bearer|authorization|password)[\s:="'`]*$/i.test(near) && !/(?:commit|sha|hash|digest|checksum|id)[\s:="'`]*$/i.test(near);
       }
       if (!/(?:key|token|secret|credential|bearer|authorization|api|password|passwd)/i.test(before)) return false;
@@ -539,10 +668,28 @@ export const SECRET_RULES: readonly SecretRule[] = [
     id: 'phone',
     class: 'identifier',
     re: /(?<![\p{L}\p{N}_./=-])(?:\+\d{1,3}[\s.-]?\(?\d{1,4}\)?(?:[\s.-]\d{2,6}){2,4}|\(\d{2,4}\)[\s.-]?\d{3,5}[\s.-]\d{4}|\d{2,4}[\s.-]\d{3,5}[\s.-]\d{4})(?![\p{L}\p{N}_/-])/gu,
-    accept: m => {
+    accept: (m, text, at) => {
       const n = digitsOf(m).length;
-      return n >= 9 && n <= 14 && !/^\d{4}-\d{2}-\d{2}/.test(m);
+      if (n < 9 || n > 14 || /^\d{4}-\d{2}-\d{2}/.test(m)) return false;
+      if (/^[+(]/.test(m)) return true; // a country code or a bracketed area code: written as a phone number
+      return !numberListNotPhone(m, text, at);
     },
+  },
+  // National layouts with a leading trunk 0 or a mobile prefix that a list of numbers does not look like: French five pairs
+  // ("06 12 34 56 78"), UK/AU/DE mobile written 4-3-3, 5-3-3 or 4-3-5 ("0412 345 678", "0151 234 56789"), Dutch "06 12345678" and a
+  // "+31 6 12345678", Indian 5-5 ("98765 43210"). Each needs its separators; a bare run of digits stays allowed.
+  {
+    id: 'phone',
+    class: 'identifier',
+    re: /(?<![\p{L}\p{N}_./=-])(?:0[1-9](?:[ .-]\d{2}){4}|0\d{3,4}[ .-]\d{3}[ .-]\d{3,5}|06[ -]\d{8}|\+\d{1,3}[ .-]\d{1,3}[ .-]\d{7,8}|[6-9]\d{4}[ -]\d{5})(?![\p{L}\p{N}_/-])/gu,
+  },
+  // Three groups of three digits ("912 345 678", "612 34 56 78") read as a list of numbers unless the line says it is a phone:
+  // a phone word in Portuguese, Spanish, English, French, German or Polish within the line is required.
+  {
+    id: 'phone',
+    class: 'identifier',
+    re: /(?<![\p{L}\p{N}_./=-])(?:\d{3}[ .-]\d{3}[ .-]\d{3}|\d{3}[ .-]\d{2}[ .-]\d{2}[ .-]\d{2})(?![\p{L}\p{N}_/-])/gu,
+    accept: (_m, text, at) => lineHasPhoneCue(text, at),
   },
 ];
 
@@ -601,6 +748,24 @@ function isKeyTail(run: string): boolean {
   return KEY_MARK.test(run) && /[A-Za-z0-9]/.test(run);
 }
 
+/**
+ * The finding measured on `joined` (the text with the whitespace between key pieces removed), re-measured on `original`. `joined` is
+ * `original` minus some whitespace runs, so walking both in step finds where each joined character came from.
+ */
+function spanInOriginal(finding: SecretFinding, original: string, joined: string): SecretFinding {
+  const from: number[] = [];
+  let o = 0;
+  for (let j = 0; j < joined.length; j++) {
+    while (o < original.length && original[o] !== joined[j]) o++;
+    from.push(o);
+    o++;
+  }
+  const first = from[finding.at];
+  const last = from[finding.at + finding.length - 1];
+  if (first === undefined || last === undefined) return finding;
+  return { ...finding, at: first, length: last + 1 - first };
+}
+
 /** Most pieces after the first that a split key is joined from: a wrapped key has two or three, a list of words has many. */
 const MAX_JOINS = 3;
 
@@ -619,6 +784,33 @@ function foldForScan(text: string): string {
     .replace(/\p{Cf}/gu, '');
 }
 
+/**
+ * A finding's `at` and `length` are measured on the folded text (invisible characters removed, NFKC applied). Map them back to the
+ * text as written, so a refusal that points at a range points at the characters the person typed (review of #1940). Each written
+ * character is folded on its own; when that does not rebuild the folded text exactly, the offsets are left as they are.
+ */
+function toWrittenOffsets(finding: SecretFinding, text: string, folded: string): SecretFinding {
+  if (text === folded || finding.length === 0) return finding;
+  const startOf: number[] = [];
+  const endOf: number[] = [];
+  let rebuilt = '';
+  let i = 0;
+  for (const ch of text) {
+    const piece = foldForScan(ch);
+    for (let k = 0; k < piece.length; k++) {
+      startOf.push(i);
+      endOf.push(i + ch.length);
+    }
+    rebuilt += piece;
+    i += ch.length;
+  }
+  if (rebuilt !== folded) return finding;
+  const first = startOf[finding.at];
+  const last = endOf[finding.at + finding.length - 1];
+  if (first === undefined || last === undefined) return finding;
+  return { ...finding, at: first, length: last - first };
+}
+
 const SPLIT_RULES = SECRET_RULES.filter(rule => rule.split);
 const IDENTIFIER_RULES = SECRET_RULES.filter(rule => rule.class === 'identifier');
 
@@ -626,11 +818,28 @@ const IDENTIFIER_RULES = SECRET_RULES.filter(rule => rule.class === 'identifier'
 const foldSeparators = (text: string) => text.replace(/[\p{Pd}\u2212]/gu, '-').replace(/\p{Zs}/gu, ' ');
 
 
+/** Every non-space character: each becomes a bullet, so no character of a value survives, punctuation included (a password may hold any of them). */
+const MASK_HIDE = /\S/gu;
+const MASK_CAP = 24;
+
+/**
+ * The shape of `match`: each non-space character a bullet, spaces kept, capped at MASK_CAP
+ * characters with an ellipsis. "password is hunter2" masks to "•••••••• •• •••••••" — enough to point at the part that
+ * was refused, and nothing of what it said.
+ */
+export function maskMatch(match: string): string {
+  const shape = match.slice(0, MASK_CAP + 1).replace(MASK_HIDE, '•');
+  return shape.length > MASK_CAP ? `${shape.slice(0, MASK_CAP)}…` : shape;
+}
+
 function firstMatch(text: string, rules: readonly SecretRule[]): SecretFinding | null {
   for (const rule of rules) {
     if (rule.needs && text.search(rule.needs) < 0) continue;
     for (const m of text.matchAll(rule.re)) {
-      if (!rule.accept || rule.accept(m[0], text, m.index)) return { rule: rule.id, class: rule.class };
+      const ok = rule.accept ? rule.accept(m[0], text, m.index) : true;
+      if (ok === false) continue;
+      if (ok === true) return { rule: rule.id, class: rule.class, masked: maskMatch(m[0]), at: m.index, length: m[0].length };
+      return { rule: rule.id, class: rule.class, masked: maskMatch(text.slice(ok.at, ok.at + ok.length)), at: ok.at, length: ok.length };
     }
   }
   return null;
@@ -644,7 +853,7 @@ function firstMatch(text: string, rules: readonly SecretRule[]): SecretFinding |
 export function scanSecrets(text: string): SecretFinding | null {
   const folded = foldForScan(text);
   const direct = firstMatch(folded, SECRET_RULES);
-  if (direct !== null) return direct;
+  if (direct !== null) return toWrittenOffsets(direct, text, folded);
   // Folding removes the invisible characters, which can also remove the word boundary a rule needs ("value\u200Bsk-proj-..." reads as
   // "valuesk-proj-..."): what the rules found in the text as written is found still.
   if (folded !== text) {
@@ -656,8 +865,13 @@ export function scanSecrets(text: string): SecretFinding | null {
   const ascii = foldSeparators(folded);
   if (ascii !== folded) {
     const found = firstMatch(ascii, IDENTIFIER_RULES);
-    if (found !== null) return found;
+    if (found !== null) return toWrittenOffsets(found, text, folded);
   }
   const joined = joinSplitKeys(folded);
-  return joined === folded ? null : firstMatch(joined, SPLIT_RULES);
+  if (joined === folded) return null;
+  const found = firstMatch(joined, SPLIT_RULES);
+  if (found === null) return null;
+  // `at` and `length` are measured on the joined copy, which lacks the line breaks and spaces joinSplitKeys took out: map them back to
+  // the folded text (the whole span, break included), then to the text as written, so the range covers the whole key (review of #1940).
+  return toWrittenOffsets(spanInOriginal(found, folded, joined), text, folded);
 }

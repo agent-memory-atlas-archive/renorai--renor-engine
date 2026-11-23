@@ -1,9 +1,10 @@
+import { removeTestDir } from '../helpers/removeDb';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createEvidenceExtractor, resolveEvidenceBounds, resolveEvidenceProvider, resolveEvidenceToolOptions } from '../../src/evidence/options';
+import { createEvidenceExtractor as openExtractor, resolveEvidenceBounds, resolveEvidenceProvider, resolveEvidenceToolOptions } from '../../src/evidence/options';
 import { EvidenceCache } from '../../src/evidence/evidenceCache';
 import { createOllamaChat } from '../../src/evidence/ollamaChat';
 import { collectOllamaKeys, ollamaKeysForEndpoint } from '../../src/evidence/keyPool';
@@ -33,6 +34,13 @@ const QUERY = 'How many days did we camp?';
 const saved: Record<string, string | undefined> = {};
 const tmpDirs: string[] = [];
 const servers: StubChat[] = [];
+const extractors: NonNullable<ReturnType<typeof openExtractor>>[] = [];
+
+function createEvidenceExtractor(options: Parameters<typeof openExtractor>[0]) {
+  const extractor = openExtractor(options);
+  if (extractor) extractors.push(extractor);
+  return extractor;
+}
 
 function tmpDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-bounds-'));
@@ -74,8 +82,9 @@ afterEach(async () => {
     if (saved[name] === undefined) delete process.env[name];
     else process.env[name] = saved[name];
   }
+  for (const extractor of extractors.splice(0)) extractor.close();
   for (const server of servers.splice(0)) await server.close();
-  for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of tmpDirs.splice(0)) removeTestDir(dir);
 });
 
 describe('3a: a token bound and a reasoning-effort bound, sent only when the operator sets them', () => {

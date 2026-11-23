@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import { defaultContextMaxTokens } from '../retrieval/orchestrator';
 
 /**
- * A context-engineering profile for the HTTP server's agent surface: four levers, each off unless its variable is set,
- * so a benchmark arm (scripts/eval/agent-tasks/) can change one at a time and a lever that wins can ship as a default
- * later. Off, the server is exactly what it was: the same instructions, listing and replies.
+ * A context-engineering profile for the HTTP server's agent surface: four levers a benchmark arm (scripts/eval/agent-tasks/)
+ * can change one at a time. Each is off unless its variable is set, with one shipped default: the service entry lists the
+ * `coding` tool set when RENOR_MCP_TOOLS is unset and keeps every tool callable (applyShippedToolsDefault). An in-process
+ * build with nothing set is exactly what it was: the same instructions, listing and replies.
  *
  *   RENOR_MCP_TOOLS              comma-separated tool names: only these are listed and run (the others are disabled in
  *                                the SDK's registry, as a directory client's hidden tools are). `lean` / `coding` name the
@@ -21,6 +22,11 @@ import { defaultContextMaxTokens } from '../retrieval/orchestrator';
  */
 export interface ContextProfile {
   tools?: Set<string>;
+  /**
+   * The shipped default (issue #1222): only these tools are LISTED (tools/list and the instructions), and every tool stays
+   * callable by name exactly as before. `tools`, by contrast, is the strict profile: the others are disabled and refused.
+   */
+  listOnly?: Set<string>;
   descriptions?: Record<string, string>;
   /** tool -> argument -> description: listed in place of the argument's own description (the `coding` preset only). */
   argDescriptions?: Record<string, Record<string, string>>;
@@ -83,6 +89,7 @@ export const CODING_ARG_DESCRIPTIONS: Record<string, Record<string, string>> = {
 /** The "call whats_new before anything else" instruction stays unless the profile lists tools and whats_new is not among them, or RENOR_MCP_WHATS_NEW_FIRST=0. */
 export function whatsNewFirst(profile: ContextProfile, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.RENOR_MCP_WHATS_NEW_FIRST?.trim() === '0') return false;
+  if (profile.listOnly) return profile.listOnly.has('whats_new');
   return !profile.tools || profile.tools.has('whats_new');
 }
 
@@ -91,10 +98,29 @@ export function searchMemoryKeywordFallbackEnabled(env: NodeJS.ProcessEnv = proc
   return env.RENOR_SEARCH_MEMORY_KEYWORD_FALLBACK?.trim() !== '0';
 }
 
+/** Set by the service entry only (applyShippedToolsDefault); a server built in-process never sees it. */
+let shippedListingDefault = false;
+
+/**
+ * The shipped default (issue #1222), applied by the service entry (src/mvp/cli.ts) and not by an in-process build, so a harness
+ * that builds the server itself (the RenorBench arms, whose evaluator source is hashed) keeps listing every tool. When
+ * RENOR_MCP_TOOLS is unset or blank the service LISTS the coding set (a shorter tools/list and instructions, which is where the
+ * token saving is) and keeps every tool callable by name, so our own clients that call retire_memory, memory_map, preview_import
+ * and the like keep working. An explicit value (`coding`, `lean`, `all`, a list) is read as before, strict listing included.
+ */
+export function applyShippedToolsDefault(env: NodeJS.ProcessEnv = process.env): void {
+  shippedListingDefault = !env.RENOR_MCP_TOOLS?.trim();
+}
+
+/** Test helper: forget the shipped default, as a process that never called the service entry. */
+export function resetShippedToolsDefault(): void {
+  shippedListingDefault = false;
+}
+
 export function contextProfileFromEnv(env: NodeJS.ProcessEnv = process.env): ContextProfile {
   const profile: ContextProfile = {};
   const tools = env.RENOR_MCP_TOOLS?.trim();
-  if (tools === 'all') { /* the full set: no restriction, and the off switch for a connection's ?tools=coding */ }
+  if (tools === 'all' || tools === 'full') { /* the full set: no restriction. `all` is also the off switch for a connection's ?tools=coding (setup.ts); `full` lets that choice narrow */ }
   else if (tools === 'lean') profile.tools = new Set(LEAN_TOOLS);
   else if (tools === 'coding') {
     profile.tools = new Set(CODING_TOOLS);
@@ -102,6 +128,11 @@ export function contextProfileFromEnv(env: NodeJS.ProcessEnv = process.env): Con
     profile.argDescriptions = CODING_ARG_DESCRIPTIONS;
   }
   else if (tools) profile.tools = new Set(tools.split(',').map(t => t.trim()).filter(Boolean));
+  else if (shippedListingDefault) {
+    profile.listOnly = new Set(CODING_TOOLS);
+    profile.descriptions = { ...CODING_DESCRIPTIONS };
+    profile.argDescriptions = CODING_ARG_DESCRIPTIONS;
+  }
   const descriptions = env.RENOR_MCP_DESCRIPTIONS_FILE?.trim();
   if (descriptions) {
     const parsed: unknown = JSON.parse(fs.readFileSync(descriptions, 'utf8'));
@@ -127,7 +158,7 @@ export function contextProfileFromEnv(env: NodeJS.ProcessEnv = process.env): Con
 /** Fail the build on a profile that names a tool the server does not have: a typo would otherwise switch a lever off. */
 export function checkProfileTools(profile: ContextProfile, registered: string[]): void {
   const known = new Set(registered);
-  for (const name of [...(profile.tools ?? []), ...Object.keys(profile.descriptions ?? {})]) {
+  for (const name of [...(profile.tools ?? []), ...(profile.listOnly ?? []), ...Object.keys(profile.descriptions ?? {})]) {
     if (!known.has(name)) throw new Error(`the context profile names ${name}, which this server does not register`);
   }
 }

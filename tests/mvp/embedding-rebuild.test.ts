@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { removeTestDir } from '../helpers/removeDb';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -35,7 +36,12 @@ const tmpDirs: string[] = [];
 const services: Array<MvpApp & { httpServer: import('http').Server }> = [];
 const dbs: Database.Database[] = [];
 
+// The evidence pass is not under test here: left on, each service opens an evidence-cache.db that its owner never closes.
+const EVIDENCE_BEFORE = process.env.RENOR_SEARCH_EVIDENCE;
+beforeEach(() => { process.env.RENOR_SEARCH_EVIDENCE = '0'; });
+
 afterEach(async () => {
+  if (EVIDENCE_BEFORE === undefined) delete process.env.RENOR_SEARCH_EVIDENCE; else process.env.RENOR_SEARCH_EVIDENCE = EVIDENCE_BEFORE;
   vi.restoreAllMocks();
   while (services.length) {
     const s = services.pop()!;
@@ -43,8 +49,8 @@ afterEach(async () => {
     s.httpServer.close();
     await s.close();
   }
-  while (dbs.length) dbs.pop()!.close();
-  for (const d of tmpDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const db of dbs.splice(0)) if (db.open) db.close();
+  for (const d of tmpDirs.splice(0)) removeTestDir(d);
 });
 
 function tmp(prefix: string): string {
@@ -158,6 +164,7 @@ async function workspaceBuiltByA(named: boolean, extra: Record<string, string> =
   const config = mcpConfig(memoryDir, await freePort());
   fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
   const db = openDb(config.dbPath);
+  dbs.push(db);
   runMigrations(db);
   const a = new ModelA();
   const engine = attachEngine(db, { embeddingProvider: 'none' } as MvpConfig, a);
@@ -437,6 +444,7 @@ describe.skipIf(HTTP_SERVER_UNSUPPORTED)('the service rebuilds a mixed or unknow
     const legacy = await workspaceBuiltByA(true);
     const before = (() => {
       const db = openDb(legacy.config.dbPath);
+      dbs.push(db);
       const ids = (db.prepare('SELECT rowid FROM chunk_embeddings_rowids ORDER BY rowid').pluck().all() as number[]).join(',');
       const vector = new VectorIndex(db, 256).get(1);
       db.close();

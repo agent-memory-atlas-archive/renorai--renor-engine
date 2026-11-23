@@ -128,7 +128,8 @@ describe('registering and signalling a child tree', () => {
     expect(await until(() => !alive(pair.grandchild))).toBe(true);
   });
 
-  it('a signal other than SIGKILL keeps the record, so a child that ignores it is still named', async () => {
+  // Windows has no SIGTERM: child.kill() ends the process outright, so a handler that ignores it cannot exist there.
+  it.skipIf(process.platform === 'win32')('a signal other than SIGKILL keeps the record, so a child that ignores it is still named', async () => {
     const child = spawnTree(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 600000)"], { stdio: 'ignore' });
     started.push(child);
     await new Promise((resolve) => setTimeout(resolve, 300));

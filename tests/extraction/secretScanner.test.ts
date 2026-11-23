@@ -365,16 +365,129 @@ describe('benign text', () => {
   });
 });
 
+/**
+ * Issue 1938: the server agent's saves of what it merged were refused. A list of pull request numbers read as a phone
+ * number, and a git object name after a cue word read as a key. Both are what an agent writes every day; neither is a
+ * secret. The texts below are the four shapes the issue asked for (a list of numbers, a 40-character hash, a short hash,
+ * several of each in one sentence), and the refusals that must stay.
+ */
+describe('git object names and lists of plain numbers (issue 1938)', () => {
+  const SHA1 = '71f2a1832b4f5e6d9c0a1b2c3d4e5f60718293a4';
+  const SHA1B = '3c9ab77e1d2f4b5a6c7d8e9f0a1b2c3d4e5f6071';
+  const SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+  it('stores a save that lists pull request or issue numbers', () => {
+    for (const text of [
+      'PRs 1937 1938 1936 merged today',
+      'merged 1937 1938 1936 and 1935',
+      'PR numbers: 1861 1849 1788 1773 1770 1745 1692',
+      'queue issues 1237 1249 1306 1361 1394',
+      'issues 101 1002 1003 are the open ones',
+      'merged PRs 1861, 1849, 1788 and 1773 today',
+    ]) expect(flag(text), text).toBeNull();
+  });
+
+  it('stores a git object name said next to a git word: full, short, several in one sentence', () => {
+    for (const text of [
+      `merged at commit ${SHA1}`,
+      `the head sha is ${SHA1}`,
+      `the commit hash is 71f2a18`,
+      `the short sha is 71f2a1832b4f`,
+      `the tree sha is ${SHA256}`,
+      `https://github.com/patrickpassosb/renor/commit/${SHA1}`,
+      `merged PRs 1937 1938 1936 at commits 71f2a18 3c9ab77 and ${SHA1}`,
+      `merged #1861 at commit ${SHA1} and #1849 at commit ${SHA1B}`,
+    ]) expect(flag(text), text).toBeNull();
+  });
+
+  it('still refuses a key-shaped value, and a hash offered as a key with no git word near it', () => {
+    for (const text of [
+      `the api key is ${SHA1}`, // 40 hex after a key cue and no git word: judged as the value it is
+      `the token is ${SHA1}`,
+      'my password is hunter2',
+      'my pin is 4821',
+      `the api key is ${SHA256.slice(0, 48)}`,
+      // a git word INSIDE the cue phrase names a credential, not a commit (review of #1940)
+      `my git token is ${SHA1}`,
+      `the github.com api key is ${SHA1}`,
+      `the tag secret is ${SHA1}`,
+      `the branch password is ${SHA1}`,
+    ]) expect(flag(text), text).toMatch(/^credential:/);
+  });
+
+  it('a git word elsewhere on the line does not clear a credential (review of #1940)', () => {
+    for (const text of [
+      'my password is deadbeef12 (rev 2)',
+      'commit message: the password is deadbeef12',
+      `git commit; the api key is ${SHA1}`,
+      `the api key is ${SHA1} for the merge job`,
+      `the git tag key ${SHA256}`,
+      `the head branch api key ${SHA256}`,
+    ]) expect(flag(text), text).toMatch(/^credential:/);
+  });
+
+  it('a bare merge or hash inside the cue phrase names a credential (review of #1940)', () => {
+    for (const text of ['my password for merge is deadbeef12', `the api key hash is ${SHA1}`, `the token merge is ${SHA1}`]) expect(flag(text), text).not.toBeNull();
+  });
+
+  it('a commit, sha or revision word ending the cue phrase names a credential (review of #1940)', () => {
+    for (const text of ['my password for commit is deadbeef12', `the api key sha is ${SHA1}`, `the token for the commit is ${SHA1}`, 'the secret for revision is deadbeef12', 'my password for the commit hash is deadbeef12', `the api key commit hash is ${SHA1}`, `secret commit hash is 71f2a18`, 'my password for commit: deadbeef12', `the api key sha: ${SHA1}`, `the token for the commit = ${SHA1}`, 'secret commit hash: 71f2a18']) expect(flag(text), text).not.toBeNull();
+  });
+
+  it('a finding points at the text as written, not at the folded copy (review of #1940)', () => {
+    const text = 'prefix\u200b password is hunter2';
+    const found = scanSecrets(text);
+    expect(found).not.toBeNull();
+    expect(text.slice(found!.at, found!.at + found!.length).endsWith('hunter2')).toBe(true);
+  });
+
+  it('a git word directly against the value still clears it', () => {
+    for (const text of [`merged, the token: commit ${SHA1}`, `the token is sha: ${SHA1}`]) expect(flag(text), text).toBeNull();
+  });
+
+  it('a list word does not clear a run laid out like a phone number (review of #1940)', () => {
+    for (const text of ['run 415 555 0132', 'build 415 555 0132 tonight', 'queue 4155 555 0132', 'Call the support line for issues 020 7946 0958', 'For billing issues 020 7946 0958']) {
+      expect(flag(text), text).toBe('identifier:phone');
+    }
+    expect(flag('issues 101 1002 1003 are the open ones')).toBeNull(); // lists of uneven groups stay lists
+  });
+
+  it('a list word does not clear a run whose groups start with a zero (2-4-4 trunk layout; review of #1940)', () => {
+    expect(flag('For billing issues 02 5550 0123')).toBe('identifier:phone');
+  });
+
+  it('the mask carries no character of a credential value, punctuation included (review of #1940)', () => {
+    const value = 'a#-_/+@.:=b';
+    const f = scanSecrets(`my password is ${value}`);
+    expect(f).not.toBeNull();
+    expect(f!.masked).not.toMatch(/[#\-_/+@.:=]/);
+    expect(f!.masked).toMatch(/^[•\s…]+$/u);
+  });
+
+  it('still refuses a phone number written like one, however the digits are grouped', () => {
+    for (const t of ['+55 11 91234-5678', '+1 (415) 555-0159', '(415) 555-0132', '415-555-0132', '0800 123 4567', '415 555 0132', '020 7946 0958']) {
+      expect(flag(`Call me on ${t} tonight.`), t).toBe('identifier:phone');
+    }
+    expect(flag('my number is 415 555 0132')).toBe('identifier:phone');
+    // a card is a card: four groups of four digits that pass the check sum and carry an issuer prefix
+    expect(flag('card 4111 1111 1111 1111 expires soon')).toBe('identifier:payment-card');
+  });
+});
+
 describe('what a finding holds', () => {
   it('is a class and a rule label from the table, never text from the input', () => {
     const labels = new Set(SECRET_RULES.map(r => r.id));
     for (const it of buildPlantedSet().filter(i => i.gold !== 'store')) {
       const f = scanSecrets(it.text);
       if (f === null) continue;
-      expect(Object.keys(f).sort()).toEqual(['class', 'rule']);
+      expect(Object.keys(f).sort()).toEqual(['at', 'class', 'length', 'masked', 'rule']);
       expect(labels.has(f.rule)).toBe(true);
       expect(['credential', 'identifier']).toContain(f.class);
-      // belt and braces on top of the two checks above: the random tail of a secret is not in what came back
+      // the mask says WHERE and WHAT SHAPE, never what it said: it holds no letter and no digit, and it points at a real part of the text
+      expect(f.masked).not.toMatch(/[\p{L}\p{N}]/u);
+      expect(f.at).toBeGreaterThanOrEqual(0);
+      expect(f.length).toBeGreaterThan(0);
+      // belt and braces on top of the checks above: the random tail of a secret is not in what came back
       for (const secret of it.secrets) if (secret.length >= 12) expect(JSON.stringify(f)).not.toContain(secret.slice(-12));
     }
   });
@@ -669,5 +782,29 @@ describe('what the scanner reads', () => {
       const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
       expect(code, file).not.toMatch(/\b(fetch|XMLHttpRequest|WebSocket|child_process|spawn|exec|http|https|net|dgram|dns)\b\s*[(.'"]/);
     }
+  });
+});
+
+describe('refusal spans and the 3-4-4 mobile layout (review of #1940, head 50dab7a)', () => {
+  it('a list word does not clear a 3-4-4 mobile number, and still clears a list of ticket numbers', () => {
+    expect(flag('billing issues 138 1234 5678')).toMatch(/^identifier:/);
+    expect(flag('issues 101 1002 1003 are the open ones')).toBeNull();
+  });
+
+  it('points at the credential after a placeholder, not at the cue and the placeholder', () => {
+    const text = 'password: ${DB_PASSWORD} then Zq8Lm2Vn7Rt4';
+    const found = scanSecrets(text);
+    expect(found?.rule).toBe('credential-in-words');
+    expect(text.slice(found!.at, found!.at + found!.length)).toBe('Zq8Lm2Vn7Rt4');
+  });
+
+  it('a key wrapped over a line break is reported over the whole key in the submitted text', () => {
+    const key = 'sk-proj-Fk3vQ9Lm2Xz8Wp4Rt6Yh1Nb';
+    const text = `note ${key.slice(0, 14)}\n${key.slice(14)} end`;
+    const found = scanSecrets(text);
+    expect(found?.rule).toBe('api-key');
+    const span = text.slice(found!.at, found!.at + found!.length);
+    expect(span.replace(/\s+/g, '')).toBe(key);
+    expect(span.endsWith(key.slice(-1))).toBe(true);
   });
 });

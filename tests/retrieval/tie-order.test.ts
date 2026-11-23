@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import fs from 'fs';
 import type Database from '../../src/db/sqlite';
 import { openDb } from '../../src/db/client';
 import { runMigrations } from '../../src/db/schema';
@@ -8,6 +7,7 @@ import { semanticSearch } from '../../src/retrieval/semantic';
 import { keywordSearch } from '../../src/retrieval/keyword';
 import { lookupEntity } from '../../src/retrieval/entityLookup';
 import { retrieveContext } from '../../src/retrieval/orchestrator';
+import { removeDb } from '../helpers/removeDb';
 import { tmpPath } from '../helpers/tmpPath';
 
 /**
@@ -23,7 +23,7 @@ const opened: Array<{ db: Database.Database; file: string }> = [];
 afterEach(() => {
   for (const { db, file } of opened.splice(0)) {
     db.close();
-    for (const suffix of ['', '-wal', '-shm']) fs.rmSync(file + suffix, { force: true });
+    removeDb(file);
   }
   delete process.env.RENOR_NEWEST_FIRST;
 });
@@ -32,8 +32,8 @@ let dbCount = 0;
 function freshDb(): Database.Database {
   const file = tmpPath(`tie-order-${process.pid}-${dbCount++}.db`);
   const db = openDb(file);
-  runMigrations(db);
   opened.push({ db, file });
+  runMigrations(db);
   return db;
 }
 

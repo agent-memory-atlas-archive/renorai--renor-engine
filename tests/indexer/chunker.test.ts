@@ -50,3 +50,30 @@ describe('chunkNote', () => {
     }
   });
 });
+
+describe('chunkNote with Windows line endings', () => {
+  const para = (n: number) => `Paragraph ${n}: ` + 'word '.repeat(60).trim();
+  const lf = [1, 2, 3, 4, 5, 6].map(para).join('\n\n');
+  const norm = (s: string) => s.replace(/\r/g, '');
+  const bodies: Record<string, string> = {
+    plain: lf,
+    heading: `# Title\n\n${lf}`,
+    'many entries': `# Day\n\n${lf}\n\n## Later\n\n${lf}`,
+  };
+  for (const [name, body] of Object.entries(bodies)) {
+    it(`CRLF gives the same chunks as LF: ${name}`, () => {
+      const a = chunkNote(note(body), { maxTokens: 150 });
+      const b = chunkNote(note(body.replace(/\n/g, '\r\n')), { maxTokens: 150 });
+      expect(a.length).toBeGreaterThan(1);
+      expect(b.length).toBe(a.length);
+      expect(b.map(c => norm(c.text))).toEqual(a.map(c => c.text));
+      expect(b.map(c => [c.startLine, c.endLine])).toEqual(a.map(c => [c.startLine, c.endLine]));
+    });
+  }
+
+  it('does not crash on a lone CR or mixed endings', () => {
+    const mixed = [1, 2, 3, 4].map(para).join('\r\n\n');
+    expect(chunkNote(note(mixed), { maxTokens: 150 }).length).toBeGreaterThan(1);
+    expect(() => chunkNote(note(lf.replace(/\n/g, '\r')), { maxTokens: 150 })).not.toThrow();
+  });
+});

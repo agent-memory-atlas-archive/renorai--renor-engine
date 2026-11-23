@@ -8,7 +8,6 @@ import { scanSecrets } from '../extraction/secretScanner';
 import { normalizeScope } from './scope';
 
 export const OBSERVE_METHOD = 'renor/observe' as const;
-export const OBSERVE_DEFAULT_OFF_REASON = 'The owner requires the write-side eval to beat today first.';
 export const DEFAULT_OBSERVATION_RETENTION_DAYS = 90;
 export const DEFAULT_OBSERVATION_MAX_ROWS = 20_000;
 export const OBSERVATION_IDLE_MS = 30 * 60_000;
@@ -54,14 +53,18 @@ interface StoredRow {
 }
 
 export function observeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return /^(1|on|true|yes)$/i.test(env.RENOR_OBSERVE?.trim() ?? '');
+  // On by default (owner rule, 4 Nov 2026); RENOR_OBSERVE=0|off|false|no is the one off switch.
+  return !/^(0|off|false|no)$/i.test(env.RENOR_OBSERVE?.trim() ?? '');
 }
 
 export interface ObservationSource {
   listSession(workspace: string, session_id: string): ObserveParams[];
 }
 
+// The schema is created once per database handle: re-running six CREATE ... IF NOT EXISTS statements on every read cost about a millisecond of every get_context and search.
+const preparedDbs = new WeakSet<Database.Database>();
 function ensureTables(db: Database.Database): void {
+  if (preparedDbs.has(db)) return;
   db.exec(`
     CREATE TABLE IF NOT EXISTS observations (
       id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
@@ -79,6 +82,7 @@ function ensureTables(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS observation_summaries_scope_completed
       ON observation_summaries(workspace, cwd_scope, completed_at DESC, session_id DESC);
   `);
+  preparedDbs.add(db);
 }
 
 const compact = (value: string) => value.trim().replace(/[ \t]+/g, ' ');
@@ -179,8 +183,13 @@ export function latestObservationHandoff(db: Database.Database, workspace: strin
   } catch { return null; }
 }
 
+// The workspace path is the same string on every read; remember strings found clean (bounded) instead of scanning them again.
+const cleanStrings = new Set<string>();
 function safeString(value: string): { value: string | undefined; flagged: boolean } {
-  return scanSecrets(value) ? { value: undefined, flagged: true } : { value, flagged: false };
+  if (cleanStrings.has(value)) return { value, flagged: false };
+  if (scanSecrets(value)) return { value: undefined, flagged: true };
+  if (value.length <= 512) { if (cleanStrings.size >= 64) cleanStrings.clear(); cleanStrings.add(value); }
+  return { value, flagged: false };
 }
 
 function screenParams(params: ObserveParams): { params?: ObserveParams; redactions: number; refused: boolean } {
@@ -326,6 +335,10 @@ export function searchObservations(db: Database.Database, workspace: string, que
   try {
     const receivedAt = validNow(options.now);
     ensureTables(db);
+    // One statement for the common case: a workspace that holds no observation and no summary has nothing to prune and nothing to match,
+    // so the five statements below (two prunes, two summary drops, the match) do not run for it.
+    const held = db.prepare('SELECT EXISTS (SELECT 1 FROM observations WHERE workspace = ?) OR EXISTS (SELECT 1 FROM observation_summaries WHERE workspace = ?) AS held').get(workspace, workspace) as { held: number };
+    if (!held.held) return [];
     prune(db, workspace, receivedAt, options.retentionDays ?? DEFAULT_OBSERVATION_RETENTION_DAYS,
       options.maxRows ?? DEFAULT_OBSERVATION_MAX_ROWS);
     const match = terms.map(term => `"${term.replaceAll('"', '""')}"`).join(' OR ');
@@ -360,7 +373,7 @@ function exportRow(row: StoredRow): ObservationExportRow {
 }
 
 export function observationsForExport(db: Database.Database, workspace: string): ObservationExportRow[] {
-  if (safeString(workspace).flagged) return [];
+  // A read: the workspace is the vault path the caller already holds and is only compared against stored rows, so nothing is scanned (the secret guard's off switch stays free of the scanner).
   try {
     ensureTables(db);
     prune(db, workspace, new Date().toISOString(), DEFAULT_OBSERVATION_RETENTION_DAYS, DEFAULT_OBSERVATION_MAX_ROWS);

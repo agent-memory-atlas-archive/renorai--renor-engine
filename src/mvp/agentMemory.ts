@@ -4,6 +4,7 @@ import { encodeTokens } from '../indexer/tokenizer';
 import { escapeInvisibleControls } from './sanitize';
 import { labelMemoryText } from './hiddenSpans';
 import { currentRankingTrace } from '../retrieval/rankingTrace';
+import { contextExpandEnabled, expansionMatch, expansionTerms, isExpansion, markExpansion } from './contextExpand';
 import { FTS_STOP_WORDS, keywordDefaultsOff, keywordOrAll, keywordOrMatch } from '../retrieval/keyword';
 import { withHitDates } from './hitDates';
 import { engineSearchMemory, engineSearchText, type Engine } from './engine';
@@ -12,8 +13,10 @@ import { normalizeScope, savedScopeMatches } from './scope';
 import { contextDistinctEnabled, distinctMemories } from './contextDistinct';
 import { nameAwareRecallEnabled, nameAwareMemories, NOTHING_SAVED_NEXT } from './contextNameAware';
 import { contextNewerFirstEnabled, newerFirstMemories } from './contextNewerFirst';
+import { contextScopeFirstEnabled, projectSlugOf, scopeFirstMemories } from './contextScopeFirst';
+import { contextDecisionFirstEnabled, decisionFirstMemories } from './contextDecisionFirst';
 import { adaptiveDepthRules, shortPageDrops } from './contextAdaptiveDepth';
-import { claimsReservedEntrySource, eventMarker, factAuthorsByEvent } from './factMarkers';
+import { claimsReservedEntrySource, eventMarker, factAuthorsByEvent, factScopesByEvent } from './factMarkers';
 import { authorMarker } from '../memory/sourceName';
 import { authorityField, authorityOfChunk, authorityOfSource, lowestAuthority, type Authority } from '../memory/authority';
 import type { HitOrder } from '../retrieval/orchestrator';
@@ -54,6 +57,7 @@ import { buildDatedOutline, replyCeiling, datedOutlineBudget, datedOutlineEnable
 import { turnScorer, vectorsMeanSomething } from '../retrieval/readerEvents';
 import { ruleApprovalsEnabled } from './ruleApprovals';
 import { observeEnabled } from './observations';
+import { compactObservedMemories } from './observationCompaction.js';
 import { layeredScopeEnabled, layeredView, layerItems } from './layeredScope';
 
 export interface AgentContextOptions {
@@ -145,6 +149,8 @@ export interface AgentContextMemory {
   origin?: 'import';
   /** `true` on a memory a newer, near-identical memory on the same page follows from (RENOR_CONTEXT_NEWER_FIRST, off by default). */
   earlier?: true;
+  /** RENOR_CONTEXT_DECISION_FIRST: a saved decision that answers the question, listed first. Absent when the flag is off. */
+  decision?: true;
 }
 
 export { FTS_STOP_WORDS } from '../retrieval/keyword';
@@ -837,6 +843,20 @@ function normalizeMemory(raw: unknown, fallbackReason: string, reader?: string):
   };
 }
 
+/** For scope-first: the scope a ledger-backed memory's event was saved in (from its fact), or null. Reads nothing when no project is known. */
+function ledgerSavedScope(
+  db: Database.Database, memories: readonly AgentContextMemory[], isLedger: (notePath: string) => boolean, project: string | null,
+): ((memory: AgentContextMemory) => string | null) | undefined {
+  if (project === null) return undefined;
+  const scopes = factScopesByEvent(db, memories.flatMap(memory => (isLedger(memory.notePath) ? ledgerEventIds(memory) : [])));
+  if (scopes.size === 0) return undefined;
+  return memory => {
+    if (!isLedger(memory.notePath)) return null;
+    const saved = ledgerEventIds(memory).map(id => scopes.get(id));
+    return saved.length > 0 && saved.every(s => s !== undefined && s === saved[0]) ? saved[0]! : null;
+  };
+}
+
 export const CONTEXT_LEAN_ITEMS_FLAG = 'RENOR_CONTEXT_LEAN_ITEMS';
 
 /** get_context's lean memory items (RENOR_CONTEXT_LEAN_ITEMS): off by default, and the reply is then what it always was. */
@@ -845,16 +865,70 @@ export function contextLeanItemsEnabled(env: NodeJS.ProcessEnv = process.env): b
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
+export const CONTEXT_LEAN_WHY_FLAG = 'RENOR_CONTEXT_LEAN_WHY';
+
 /**
- * A memory as the lean get_context lists it: its text as stored, the day it was written, and every marker it carries
- * (replaced, matched, origin, source, untrusted). The note path, heading, score and reason go: they cost about twice
- * the memory's own text (an item was about 107 tokens for 32 of text, docs/evals/results/agent-workflow-20261020), and
- * the reply is already in the order they decided. A daily entry's text keeps its own time and writer.
+ * The short `why` on each lean memory (RENOR_CONTEXT_LEAN_WHY): a lean item drops `score` and `reason`, so an agent
+ * cannot tell a match from filler (issue #1937, two agents on 13 Nov 2026).
+ *
+ * Off by default, as issue #1937 pre-registered: it asked for the default only if the why costs at most 3% more tokens
+ * per reply, and the measurement (scripts/eval/context-why/tokens.ts, 50 questions, max_tokens 800) is +11.4% — a few
+ * words cost about a tenth of a lean item, whatever they say. `1`, `true`, `yes` or `on` adds it; anything else leaves
+ * the lean reply byte-identical. It is read only where the lean items are.
  */
-export function leanMemory(memory: AgentContextMemory): Record<string, unknown> {
+export function contextLeanWhyEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env[CONTEXT_LEAN_WHY_FLAG] ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+/**
+ * One word for a retrieval lane, as a lean item says why it is there. The lane is the first part of a `reason`
+ * (`semantic+content+recency` is the semantic lane); anything not listed here says nothing an agent can use, so it
+ * is left out rather than repeated.
+ */
+const WHY_WORDS: Record<string, string> = {
+  semantic: 'meaning',
+  fts: 'words',
+  keyword: 'words',
+  'note-identity': 'name',
+  fact: 'fact',
+  graph: 'linked',
+  [SESSION_EXPAND_REASON]: 'linked',
+  timeline: 'dated',
+  span: 'dated',
+  events: 'ledger',
+  'evidence-source': 'source',
+};
+/**
+ * Why this memory is in the reply, in a few words: the lane that found it (`words`, `meaning`, `name`, `linked`,
+ * `fact`), and the other lane when the question's own words found it too (`meaning+words`). No number is printed: the
+ * score a memory carries here is the final ranking score, already adjusted by content, priority, entity, recency and
+ * temporal terms, so it is not the semantic similarity and would overstate a weak match.
+ * Nothing it cannot name is guessed at: an unknown lane has no `why`.
+ */
+export function whyForReply(memory: Pick<AgentContextMemory, 'reason'> & { score?: number }): string | undefined {
+  const parts = memory.reason.split('+');
+  const lane = WHY_WORDS[parts[0]];
+  if (lane === undefined) return undefined;
+  const words = [
+    lane,
+    ...(lane !== 'words' && parts.slice(1).some(part => WORD_MATCH_REASONS.includes(part)) ? ['words'] : []),
+  ];
+  return words.join('+');
+}
+
+/**
+ * A memory as the lean get_context lists it: its text as stored, the day it was written, why it matched (a few words,
+ * RENOR_CONTEXT_LEAN_WHY) and every marker it carries (replaced, matched, origin, source, untrusted). The note path,
+ * heading, score and reason go: they cost about twice the memory's own text (an item was about 107 tokens for 32 of
+ * text, docs/evals/results/agent-workflow-20261020), and the reply is already in the order they decided. A daily
+ * entry's text keeps its own time and writer.
+ */
+export function leanMemory(memory: AgentContextMemory, options: { why?: boolean } = {}): Record<string, unknown> {
   const { notePath: _notePath, headingPath: _headingPath, text, score: _score, reason: _reason, session_date, ...markers } = memory;
   const day = session_date === undefined ? undefined : /^\d{4}-\d{2}-\d{2}/.exec(session_date)?.[0] ?? session_date;
-  return { text, ...(day === undefined ? {} : { session_date: day }), ...markers };
+  const why = options.why === true ? whyForReply(memory) : undefined;
+  return { text, ...(day === undefined ? {} : { session_date: day }), ...(why === undefined ? {} : { why }), ...markers };
 }
 
 /** The reasons of a memory the question's own words found (keyword search), as opposed to one found by meaning alone. */
@@ -983,8 +1057,10 @@ export function matchBudgetOrder(memories: ReadonlyArray<AgentContextMemory>, se
   const lead: number[] = [];
   const scored: number[] = [];
   const found: number[] = [];
+  const expanded: number[] = []; // RENOR_CONTEXT_EXPAND hits: budgeted after every direct match
   memories.forEach((memory, i) => {
     if (memory.reason === SESSION_EXPAND_REASON) return;
+    if (isExpansion(memory)) { expanded.push(i); return; }
     if (i < leading) lead.push(i);
     else if (memory.reason.split('+').every(reason => WORD_MATCH_REASONS.includes(reason))) found.push(i);
     else scored.push(i);
@@ -1004,11 +1080,11 @@ export function matchBudgetOrder(memories: ReadonlyArray<AgentContextMemory>, se
         const head = `${memories[i].headingPath ?? ''}\n${String(memories[i].text).slice(0, 200)}`.toLowerCase();
         return names.some(name => head.includes(name));
       };
-      if (fused) return [...lead, ...fused.filter(named), ...fused.filter(i => !named(i))];
-      return [...lead, ...scored.filter(named), ...scored.filter(i => !named(i)), ...found];
+      if (fused) return [...lead, ...fused.filter(named), ...fused.filter(i => !named(i)), ...expanded];
+      return [...lead, ...scored.filter(named), ...scored.filter(i => !named(i)), ...found, ...expanded];
     }
   }
-  return fused ? [...lead, ...fused] : [...lead, ...scored, ...found];
+  return fused ? [...lead, ...fused, ...expanded] : [...lead, ...scored, ...found, ...expanded];
 }
 
 export const CONTEXT_RANK_FUSION_FLAG = 'RENOR_CONTEXT_RANK_FUSION';
@@ -1022,6 +1098,31 @@ export function contextRankFusionEnabled(env: NodeJS.ProcessEnv = process.env): 
   const raw = (env[CONTEXT_RANK_FUSION_FLAG] ?? '').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
+
+/**
+ * get_context's budget skip (RENOR_BUDGET_SKIP, issue #2012): off, a match that does not fit in what is left ends the run of
+ * matches, so one long match early in the order loses the smaller ones behind it. On, it is skipped and the run goes on, until
+ * BUDGET_SKIP_LIMIT matches in a row did not fit or what is left is under BUDGET_SKIP_MIN_ROOM tokens. A skipped match among the
+ * first BUDGET_SKIP_TOP of the order is listed in a short form (its first sentence, with the marker that says how to read the
+ * rest) when that fits. Unset restores the former reply byte for byte. Off until measured: the default flip is a separate step.
+ */
+const BUDGET_SKIP_FLAG = 'RENOR_BUDGET_SKIP';
+export const BUDGET_SKIP_LIMIT = 10;
+export const BUDGET_SKIP_MIN_ROOM = 12;
+export const BUDGET_SKIP_TOP = 5;
+const BUDGET_SKIP_SHORT_TOKENS = 40;
+export function budgetSkipEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env[BUDGET_SKIP_FLAG] ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+/** A short form made by the budget skip, mapped to the match it was cut from. */
+const shortFormOf = new WeakMap<AgentContextMemory, AgentContextMemory>();
+const shortForm = (memory: AgentContextMemory): AgentContextMemory => {
+  const first = memory.text.match(/^[\s\S]*?[.!?](?=\s|$)/)?.[0] ?? memory.text;
+  const cut: AgentContextMemory = { ...memory, text: capFactObject(first, BUDGET_SKIP_SHORT_TOKENS) };
+  shortFormOf.set(cut, memory);
+  return cut;
+};
 
 /** How many keyword hits get_context fetches per query variant: 6 before rank fusion, enough to reach a rank-20 match with it. */
 const KEYWORD_FETCH = 6;
@@ -1322,6 +1423,7 @@ function budgetWith(
   };
   const listed = new Set<string>();
   const kept = new Set<number>(); // the memories listed, by position
+  const shortForms = new Map<number, AgentContextMemory>(); // RENOR_BUDGET_SKIP: a top match listed in its short form
   const repeats = (memory: number): boolean => memoryEvents[memory].length > 0 && memoryEvents[memory].every(id => listed.has(id));
   // A fact the reply lists: a memory that is its event is not listed again, and gives its room back.
   const list = (event: string | null) => {
@@ -1330,7 +1432,8 @@ function budgetWith(
     for (const memory of kept) {
       if (repeats(memory)) {
         kept.delete(memory);
-        used -= cost(memories[memory]);
+        used -= cost(shortForms.get(memory) ?? memories[memory]);
+        shortForms.delete(memory);
       }
     }
   };
@@ -1413,17 +1516,35 @@ function budgetWith(
   // fits the allowance is never passed over: while nothing is passed over, a later match that does not fit ends the run, so a
   // budget that holds the top match keeps the best matches (cut by score), not the next ones that happen to be small. The top
   // match is passed over only when it can never fit: a reply cut back from over budget must not swap it for a smaller one.
-  const ranked = matchBudgetOrder(memories, serviceQuery);
+  // RENOR_CONTEXT_EXPAND hits are budgeted last of all (below, after the facts and the closest fact have their room): the
+  // match order already puts them after every direct match, but a direct fact must not lose its room to one either.
+  const ranked = matchBudgetOrder(memories, serviceQuery).filter(i => !isExpansion(memories[i]));
   const topMatch = ranked.find(i => !repeats(i) && !kept.has(i));
   let passedOver = false;
+  const skipping = budgetSkipEnabled();
+  let skipped = 0; // matches in a row that did not fit (RENOR_BUDGET_SKIP)
+  let place = 0;
   for (const i of ranked) {
     if (repeats(i) || kept.has(i)) continue;
+    place++;
     if (fits(memories[i], allowance)) {
       kept.add(i);
+      skipped = 0;
       continue;
     }
     if (i === topMatch && cost(memories[i]) > allowance) passedOver = true;
-    else if (!passedOver) break;
+    else if (skipping) {
+      if (place <= BUDGET_SKIP_TOP) {
+        const short = shortForm(memories[i]);
+        if (fits(short, allowance)) {
+          kept.add(i);
+          shortForms.set(i, short);
+          skipped = 0;
+          continue;
+        }
+      }
+      if (++skipped >= BUDGET_SKIP_LIMIT || allowance - used < BUDGET_SKIP_MIN_ROOM) break;
+    } else if (!passedOver) break;
   }
   while (keptFacts < top.length && fits(top[keptFacts], allowance)) list(factEvents[keptFacts++]);
   // What the expansion added takes what the facts and the matches left, in the order it was laid out.
@@ -1437,11 +1558,17 @@ function budgetWith(
     shownFacts.push(closest.fact);
     list(closest.event);
   }
+  // What the extra keyword search added takes what the direct matches, the facts and the closest fact left, in rank order.
+  for (const i of matchBudgetOrder(memories, serviceQuery)) {
+    if (!isExpansion(memories[i]) || repeats(i) || kept.has(i)) continue;
+    if (!fits(memories[i], allowance)) break;
+    kept.add(i);
+  }
   const shown = [...kept].sort((a, b) => a - b);
   return {
     facts: shownFacts,
-    memories: shown.map(i => memories[i]),
-    truncated: topFactCut || shownFacts.length < top.length + (closest === undefined ? 0 : 1) || memories.some((_, i) => !added(i) && !kept.has(i) && !repeats(i)),
+    memories: shown.map(i => shortForms.get(i) ?? memories[i]),
+    truncated: topFactCut || shortForms.size > 0 || shownFacts.length < top.length + (closest === undefined ? 0 : 1) || memories.some((_, i) => !added(i) && !kept.has(i) && !repeats(i)),
     tokens: used,
     listed,
   };
@@ -1610,6 +1737,20 @@ export async function buildAgentContext(
           if (normalized) { memories.push(normalized); keywordAdded.push(normalized); }
         }
       }
+      // RENOR_CONTEXT_EXPAND (off by default, #2004): one more keyword search with the question plus the distinctive words of the
+      // best matches; its hits are appended after every direct hit, so they never displace one.
+      if (contextExpandEnabled(options.env ?? process.env) && keywordAvailable && memories.length > 0) {
+        const terms = expansionTerms(query, memories.map(m => m.text));
+        const match = terms.length > 0 ? expansionMatch(query, terms) : '';
+        if (match) {
+          // The expanded vocabulary is the search's query too: a ledger event is kept only if it says one of the query's words.
+          const extra = engineSearchText(db, memoryDir, [query, ...terms].join(' '), fetch, scopeNorm, options.includeHistory === true, options.ledgerRelPath, ledgerRecords, match, false, observationScope);
+          if (extra.ok) for (const hit of extra.results) {
+            const normalized = normalizeMemory(hit, 'fts', options.reader);
+            if (normalized) { markExpansion(normalized); memories.push(normalized); keywordAdded.push(normalized); }
+          }
+        }
+      }
     });
     // A keyword match carries its date like a semantic one (search_text does): the day its entry or note was written.
     if (contextRankFusionEnabled() && keywordAdded.length > 0) {
@@ -1654,7 +1795,14 @@ export async function buildAgentContext(
   const distinct = contextDistinctEnabled(options.env) ? distinctMemories(deduplicated, facts, isLedger) : deduplicated;
   // RENOR_CONTEXT_NEWER_FIRST (off by default): of two near-identical notes, the newer is listed first and the older is tagged `earlier`.
   const newerFirst = contextNewerFirstEnabled(options.env);
-  const merged = newerFirst ? newerFirstMemories(distinct) : distinct;
+  const newerOrdered = newerFirst ? newerFirstMemories(distinct) : distinct;
+  // RENOR_CONTEXT_SCOPE_FIRST (on by default; 0 restores the old order): this project's memories first, another project's tagged and last.
+  const scopeProject = projectSlugOf(options.scope ?? options.connectionScope);
+  const scoped = contextScopeFirstEnabled(options.env)
+    ? scopeFirstMemories(newerOrdered, scopeProject, ledgerSavedScope(db, newerOrdered, isLedger, scopeProject))
+    : newerOrdered;
+  // RENOR_CONTEXT_DECISION_FIRST (off by default): a saved decision that answers the question leads, tagged `decision`.
+  const merged = query && contextDecisionFirstEnabled(options.env) ? decisionFirstMemories(scoped, query) : scoped;
   // A correction takes the best score of the memories it corrects and is cut to a share of the budget (`bindCorrections`), and
   // the reply keeps them in pairs: a replaced memory is never listed without its correction, nor before it, whatever the
   // budget cut and however the layout sorts (`pinToCorrections`, and `pinned` below). Awaited only when the workspace has a
@@ -1733,13 +1881,17 @@ export async function buildAgentContext(
   // A ledger event that is a saved fact says who saved it, as get_context's facts do: its author is read from the fact.
   const eventAuthors = factAuthorsByEvent(db, deduped.flatMap(memory => (isLedger(memory.notePath) ? ledgerEventIds(memory) : [])));
   const candidateMemories = deduped.map(memory => {
+    const candidate = candidateOf(memory);
+    return isExpansion(memory) ? markExpansion(candidate) : candidate; // normalizeMemory rebuilds a ledger item: carry the marker over
+  });
+  function candidateOf(memory: AgentContextMemory): AgentContextMemory {
     if (!isLedger(memory.notePath)) return labelMemoryText({ ...memory, ...authorityField(authorityOfChunk(memory.notePath, memory.text), options.env) });
     const plain = normalizeMemory({ ...memory, notePath: '', headingPath: '' }, memory.reason)!;
     const saved = ledgerEventIds(memory).filter(id => eventAuthors.has(id)).map(id => authorityOfSource(eventAuthors.get(id)));
     // The layered label (another project's memory) is the memory's own field: kept when the ledger's paths are taken off.
-    const label = memory.otherProject ? { otherProject: memory.otherProject, savedIn: memory.savedIn } : {};
+    const label = { ...(memory.otherProject ? { otherProject: memory.otherProject, savedIn: memory.savedIn } : {}), ...(memory.decision ? { decision: memory.decision } : {}) };
     return labelMemoryText({ ...plain, ...eventMarker(ledgerEventIds(memory), eventAuthors, options.reader), ...authorityField(lowestAuthority(saved), options.env), ...label });
-  });
+  }
   // The dated outline (RENOR_DATED_OUTLINE, off by default): the pool is read here, the block is built last (below), from
   // the room the finished reply leaves, so it never takes a place from a fact or memory. Off performs no lookup and changes
   // no reply byte. On, failure is fail-open: the block is additive, so an error omits it. A read the relevance verdict calls
@@ -1822,8 +1974,12 @@ export async function buildAgentContext(
   // listed (leanMemory), so the same max_tokens holds more of them. The read-honesty lane lists provenance on every item,
   // so it keeps its own items.
   const lean = !honestyLane && contextLeanItemsEnabled(options.env);
+  // The few words each lean item carries saying why it is there (RENOR_CONTEXT_LEAN_WHY, off by default): costed with
+  // the item, so the budget is spent on what the reply really lists.
+  const leanWhy = lean && contextLeanWhyEnabled(options.env);
+  const asLean = (memory: AgentContextMemory): Record<string, unknown> => leanMemory(memory, { why: leanWhy });
   const listedTokens = (body: Record<string, unknown>): number => replyTokens(JSON.stringify(
-    lean ? { ...body, memories: (body.memories as AgentContextMemory[]).map(leanMemory) } : body,
+    lean ? { ...body, memories: (body.memories as AgentContextMemory[]).map(asLean) } : body,
   ));
   const ledgerRel = options.ledgerRelPath ?? DEFAULT_LEDGER_REL;
   // Each item the lane lists says where it came from and when it was last verified. A fact get_context lists is a
@@ -1996,7 +2152,7 @@ export async function buildAgentContext(
       // reply, so a fact and the contradiction it brings are listed from the least max_tokens that holds them.
       size = honestyLane
         ? replyTokens(JSON.stringify('predicate' in item ? factWithProvenance(item) : memoryWithProvenance(item))) + (brings.get(bringsKey(item)) ?? 0)
-        : replyTokens(JSON.stringify(lean && !('predicate' in item) ? leanMemory(item) : item)) + 1 + (brings.get(bringsKey(item)) ?? 0);
+        : replyTokens(JSON.stringify(lean && !('predicate' in item) ? asLean(item) : item)) + 1 + (brings.get(bringsKey(item)) ?? 0);
       costs.set(item, size);
     }
     return size;
@@ -2026,7 +2182,7 @@ export async function buildAgentContext(
     let tokens = kept.tokens;
     let truncated = kept.truncated;
     for (const memory of kept.memories) {
-      const correction = correctionOf.get(memory);
+      const correction = correctionOf.get(shortFormOf.get(memory) ?? memory);
       if (correction === undefined || memories.includes(correction)) continue;
       if (tokens + cost(correction) <= allowance) {
         memories = [...memories, correction];
@@ -2038,7 +2194,7 @@ export async function buildAgentContext(
       }
     }
     if (memories === kept.memories) return kept;
-    return { ...kept, memories: itemMemories.filter(memory => memories.includes(memory)), tokens, truncated };
+    return { ...kept, memories: itemMemories.flatMap(memory => memories.filter(other => other === memory || shortFormOf.get(other) === memory)), tokens, truncated };
   };
   // What the read-honesty lane adds in the room the items leave, measured whole, so it never costs the reply an item: its
   // contradictions that no listed fact brings (inside one scope, about a subject the query names), at their least and in
@@ -2139,10 +2295,13 @@ export async function buildAgentContext(
   }
   // The layout above may have sorted a newer note after the older one it overlaps: the same rule, once more on the final list.
   if (newerFirst) reply.memories = newerFirstMemories(reply.memories as AgentContextMemory[]);
+  // The same two rules once more on the final list: the layout above sorts by score or date.
+  if (contextScopeFirstEnabled(options.env)) reply.memories = scopeFirstMemories(reply.memories as AgentContextMemory[], projectSlugOf(options.scope ?? options.connectionScope));
+  if (query && contextDecisionFirstEnabled(options.env)) reply.memories = decisionFirstMemories(reply.memories as AgentContextMemory[], query);
   if (correctionOf.size > 0) pinToCorrections(reply, correctionOf);
-  reply.memories = observationsAfterTiedMemories(reply.memories as AgentContextMemory[]);
+  reply.memories = compactObservedMemories(observationsAfterTiedMemories(reply.memories as AgentContextMemory[]));
   // Last, once the order and the pairs are settled on the full items, which say how they were found.
-  if (lean) reply.memories = (reply.memories as AgentContextMemory[]).map(leanMemory);
+  if (lean) reply.memories = (reply.memories as AgentContextMemory[]).map(asLean);
   // Last: the dated outline takes only the room the finished reply leaves (capped at its own budget), so the closest match
   // the relevance contract keeps is never crowded out by it, and the whole reply still holds max_tokens.
   if (outlinePool.length > 0) {

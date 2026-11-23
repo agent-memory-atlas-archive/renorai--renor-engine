@@ -1,4 +1,6 @@
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import {
   APP_FAMILIES, DEPLOYMENTS, EMBEDDING_FAMILIES, LATENCY_BUCKETS, NODE_MAJORS, OS_FAMILIES, TOOL_PROFILES,
 } from './fields';
@@ -69,6 +71,7 @@ export function toolProfileOf(connection: 'coding' | null, env: NodeJS.ProcessEn
   if (tools === 'all') return 'full';
   if (connection === 'coding' || tools === 'coding') return 'coding';
   if (tools === 'lean') return 'lean';
+  if (tools === 'full') return 'full';
   return tools ? 'custom' : 'full';
 }
 
@@ -91,14 +94,27 @@ export function latencyBucket(ms: number | null | undefined): LatencyBucket | nu
 const truthy = (value: string | undefined): boolean => value !== undefined && /^(1|true|yes)$/i.test(value.trim());
 
 /**
- * Whether this engine is Renor's own: RENOR_SHARING_INTERNAL=1 (set by Renor's gates, harnesses and its own hosted workspaces), or a
- * CI or test runner's own marker (CI=true, GITHUB_ACTIONS, VITEST, JEST_WORKER_ID, NODE_ENV=test). A real install sets none of these.
+ * Whether this engine runs from a git checkout of Renor (the package folder, or the repository folder above it, holds a `.git`). Our own
+ * build sessions, gates and agents run the engine this way; an install from npm never does, because it lives under node_modules.
+ */
+export function inSourceCheckout(root: string = path.resolve(__dirname, '..', '..')): boolean {
+  try {
+    return fs.existsSync(path.join(root, '.git')) || fs.existsSync(path.join(path.dirname(root), '.git'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this engine is Renor's own: RENOR_SHARING_INTERNAL=1 (set by Renor's gates, harnesses and its own hosted workspaces), a
+ * CI or test runner's own marker (CI=true, GITHUB_ACTIONS, VITEST, JEST_WORKER_ID, NODE_ENV=test), or a run from a git checkout of Renor
+ * (`checkout`). A real install sets none of these.
  * RENOR_SHARING_INTERNAL=0 says explicitly that it is not, whatever else the environment holds.
  */
-export function sharingInternal(env: NodeJS.ProcessEnv = process.env): boolean {
+export function sharingInternal(env: NodeJS.ProcessEnv = process.env, checkout: boolean = inSourceCheckout()): boolean {
   const explicit = env.RENOR_SHARING_INTERNAL?.trim();
   if (explicit !== undefined && explicit !== '') return truthy(explicit);
-  return truthy(env.CI) || truthy(env.GITHUB_ACTIONS) || (env.VITEST ?? '') !== '' || (env.JEST_WORKER_ID ?? '') !== '' || env.NODE_ENV === 'test';
+  return truthy(env.CI) || truthy(env.GITHUB_ACTIONS) || (env.VITEST ?? '') !== '' || (env.JEST_WORKER_ID ?? '') !== '' || env.NODE_ENV === 'test' || checkout;
 }
 
 /** What the sender stamps on every row: the same for every row it sends, because they are this install's. */

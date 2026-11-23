@@ -47,6 +47,8 @@ export function createServer(
   const productEvidenceExtractor = productEvidenceOptions
     ? createEvidenceExtractor(productEvidenceOptions)
     : null;
+  // The server lives as long as its process, which owns the cache handle; a test that removes the directory closes it first.
+  app.locals.closeEvidence = (): void => productEvidenceExtractor?.close();
   // C0 shared composer (ADR-0003 §5): opt-in via RENOR_STRUCTURED_CONTEXT,
   // default OFF — when off, responses are byte-identical to the pre-C0 contract.
   const structuredOn = structuredContextEnabled();

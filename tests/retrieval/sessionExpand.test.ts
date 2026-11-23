@@ -126,7 +126,7 @@ async function indexed(extra?: (vault: string) => void) {
   return { ...f, retrieve };
 }
 
-const note = (name: string) => (h: { notePath: string }) => h.notePath.endsWith(`/Sessions/${name}.md`);
+const note = (name: string) => (h: { notePath: string }) => h.notePath.split(path.sep).join('/').endsWith(`/Sessions/${name}.md`);
 const expanded = (hits: RetrievalHit[]) => hits.filter(h => h.reason === 'session-expand');
 const tokensOf = (db: Database.Database, chunkId: number) =>
   (db.prepare('SELECT token_count AS n FROM chunks WHERE id = ?').get(chunkId) as { n: number }).n;

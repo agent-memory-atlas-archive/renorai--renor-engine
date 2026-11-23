@@ -4,7 +4,7 @@ import * as z from 'zod';
 import { OUT_HIT } from '../outputSchemas.js';
 import { ruleApprovalsEnabled } from '../ruleApprovals.js';
 import { sessionIndexEnabled } from '../sessionIndex.js';
-import { captureServerOn } from '../../extraction/captureModel.js';
+import { captureProvider, captureServerOn } from '../../extraction/captureModel.js';
 import { engineStatus } from '../engine.js';
 import { identityLine } from '../identity.js';
 import { envFlagOn, captureFlagsOn, toolError } from './shared.js';
@@ -37,6 +37,7 @@ export function registerMemoryStatusTool(ctx: ToolContext): void {
         rule_approvals: z.boolean(),
         session_index: z.boolean(),
         capture_server: z.boolean(),
+        capture_provider: z.string().optional(),
       }).optional() } : {}),
       embeddingRebuild: z.object({ chunksLeft: z.number(), chunks: z.number() }).optional(),
       chunksWithoutVectors: z.number().optional(),
@@ -64,6 +65,8 @@ export function registerMemoryStatusTool(ctx: ToolContext): void {
         session_index: sessionIndexEnabled(),
         capture_server: captureServerOn(),
       };
+      // Named only where server capture is on, so every other reply stays as it was.
+      if (captureFeatures.capture_server) (captureFeatures as Record<string, unknown>).capture_provider = captureProvider();
       const captureOn = captureFlagsOn();
       // Audit of links the engine inferred (RENOR_INFER_REPLACES): ids and dates only. Present only when there is at least one, so a workspace without any reports what it always did.
       const inferredLinks = await inferredReplacements(mapContext()).catch(() => []);

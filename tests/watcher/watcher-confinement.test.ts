@@ -19,20 +19,29 @@ async function watchRun(prep: (vault: string, outside: string) => void, after: (
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'watch-confine-')));
   const vault = path.join(root, vaultName);
   const outside = path.join(root, 'outside');
-  fs.mkdirSync(vault, { recursive: true });
-  fs.mkdirSync(outside);
-  prep(vault, outside);
-  const db = openDb(path.join(root, 'idx.db'));
-  runMigrations(db);
-  const watcher = startWatcher(vault, db, {});
-  await new Promise<void>(resolve => watcher.on('ready', () => resolve()));
-  after(vault, outside);
-  await sleep(2500);
-  const paths = (db.prepare('SELECT path FROM notes').all() as { path: string }[]).map(r => path.relative(root, r.path)).sort();
-  await watcher.close();
-  db.close();
-  removeTestDir(root);
-  return paths;
+  let db: ReturnType<typeof openDb> | undefined;
+  let watcher: ReturnType<typeof startWatcher> | undefined;
+  try {
+    fs.mkdirSync(vault, { recursive: true });
+    fs.mkdirSync(outside);
+    prep(vault, outside);
+    db = openDb(path.join(root, 'idx.db'));
+    runMigrations(db);
+    watcher = startWatcher(vault, db, {});
+    const readyWatcher = watcher;
+    await new Promise<void>(resolve => readyWatcher.on('ready', () => resolve()));
+    after(vault, outside);
+    await sleep(2500);
+    return (db.prepare('SELECT path FROM notes').all() as { path: string }[])
+      .map(r => path.relative(root, r.path).split(path.sep).join('/')).sort();
+  } finally {
+    try {
+      await watcher?.close();
+    } finally {
+      db?.close();
+      removeTestDir(root);
+    }
+  }
 }
 
 describe('renor watch follows the walker\'s rules', () => {
@@ -45,7 +54,7 @@ describe('renor watch follows the walker\'s rules', () => {
       },
       (v, o) => {
         fs.symlinkSync(path.join(o, 'secret.md'), path.join(v, 'link.md'));
-        fs.symlinkSync(path.join(o, 'dir'), path.join(v, 'linkdir'));
+        fs.symlinkSync(path.join(o, 'dir'), path.join(v, 'linkdir'), process.platform === 'win32' ? 'junction' : 'dir');
         fs.writeFileSync(path.join(v, 'plain.md'), '# p\nplain');
       },
     );

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { removeTestDir } from '../helpers/removeDb';
 import { EvalCache, CACHE_SCHEMA_VERSION, KeyPool, WorkerPool, resolveEvalCachePath, resolveJudgeKeys, runWithKeyPoolRetries, parseRetryAfterMs, resolveWorkerConcurrency, summarizeQaTokenUsage, resolveCacheScope } from '../../src/eval/evalCache';
 
 function tmpDbPath(): string {
@@ -20,10 +21,7 @@ describe('EvalCache', () => {
 
   afterEach(() => {
     cache.close();
-    try { fs.unlinkSync(dbPath); } catch { /* ok */ }
-    try { fs.unlinkSync(dbPath + '-wal'); } catch { /* ok */ }
-    try { fs.unlinkSync(dbPath + '-shm'); } catch { /* ok */ }
-    try { fs.rmdirSync(path.dirname(dbPath)); } catch { /* ok */ }
+    removeTestDir(path.dirname(dbPath));
   });
 
   it('computes deterministic keys from full request bodies', () => {
@@ -191,13 +189,10 @@ describe('EvalCache', () => {
     });
     cache.close();
 
-    const cache2 = new EvalCache(dbPath);
-    const hit = cache2.get(key, 'answer');
+    cache = new EvalCache(dbPath);
+    const hit = cache.get(key, 'answer');
     expect(hit).not.toBeNull();
     expect(hit!.rawContent).toBe('durable');
-    cache2.close();
-    // Prevent double close in afterEach
-    cache = new EvalCache(dbPath);
   });
 });
 
@@ -210,10 +205,7 @@ describe('EvalCache v4 key integrity (raw body hash; pinned scope for cross-run)
   });
   afterEach(() => {
     cache.close();
-    try { fs.unlinkSync(dbPath); } catch { /* ok */ }
-    try { fs.unlinkSync(dbPath + '-wal'); } catch { /* ok */ }
-    try { fs.unlinkSync(dbPath + '-shm'); } catch { /* ok */ }
-    try { fs.rmdirSync(path.dirname(dbPath)); } catch { /* ok */ }
+    removeTestDir(path.dirname(dbPath));
   });
 
   const mkBody = (question: string, context: string) => ({
@@ -469,8 +461,8 @@ describe('eval cache utilities', () => {
 
 describe('resolveEvalCachePath', () => {
   it('returns default path when unset', () => {
-    const result = resolveEvalCachePath({ HOME: '/home/test' });
-    expect(result).toBe('/home/test/.local/share/renor/eval-cache.db');
+    const result = resolveEvalCachePath({ HOME: path.resolve('/home/test') });
+    expect(result?.split(path.sep).join('/')).toBe(path.resolve('/home/test/.local/share/renor/eval-cache.db').split(path.sep).join('/'));
   });
 
   it('returns null when off', () => {
@@ -480,7 +472,7 @@ describe('resolveEvalCachePath', () => {
 
   it('returns explicit path', () => {
     const result = resolveEvalCachePath({ RENOR_EVAL_CACHE: '/tmp/my-cache.db' });
-    expect(result).toBe('/tmp/my-cache.db');
+    expect(result?.split(path.sep).join('/')).toBe(path.resolve('/tmp/my-cache.db').split(path.sep).join('/'));
   });
 });
 

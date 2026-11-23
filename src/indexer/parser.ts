@@ -1,7 +1,7 @@
 import matter from 'gray-matter';
 import path from 'path';
 import { decodeDailyNoteText, isDailyNotePath } from '../memory/dailyNote';
-import { dailyEntryStarts } from './dailyEntries';
+import { dailyEntryStarts, newlinesBefore } from './dailyEntries';
 
 export interface ParsedNote {
   path: string;
@@ -152,6 +152,19 @@ export function parseNoteDetailed(filePath: string, content: string): { note: Pa
     rawBody,
     titleFromHeading: heading !== null,
   };
+}
+
+/**
+ * The line of the stored `content` that line 0 of the parsed body (ParsedNote.body, which every chunk's start_line
+ * and end_line count from) is: the rule dailyEntryStarts maps a body line to a stored line with. Undefined where it
+ * says nothing about entries either (the restore changed the number of lines, or the body is not a suffix).
+ */
+export function bodyFirstLine(filePath: string, content: string): number | undefined {
+  const text = isDailyNotePath(filePath) ? decodeDailyNoteText(content) : content;
+  const { content: rawBody } = matter(text, MATTER_OPTIONS);
+  if (!text.endsWith(rawBody)) return undefined;
+  if (content.split('\n').length !== newlinesBefore(text, text.length) + 1) return undefined;
+  return newlinesBefore(text, text.length - rawBody.length + (rawBody.length - rawBody.trimStart().length));
 }
 
 /** The wikilink targets in `text`, each once, in the order they first appear. */

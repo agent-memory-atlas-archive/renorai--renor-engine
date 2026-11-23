@@ -72,6 +72,12 @@ describe('the engine started with nothing npm provides', () => {
       }
     }
     expect(status, output).toBe(200);
+    // The child's stdout is a pipe read asynchronously: the 200 can arrive before the
+    // "[mvp] Listening" chunk does, so wait for the line (bounded) instead of reading once.
+    const logDeadline = Date.now() + 30_000;
+    while (Date.now() < logDeadline && !output.includes('[mvp] Listening')) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     expect(output).toContain('[mvp] Listening');
 
     child.kill('SIGTERM');

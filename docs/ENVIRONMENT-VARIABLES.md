@@ -56,5 +56,5 @@ Everything else is in [ENVIRONMENT-VARIABLES-REFERENCE.md](ENVIRONMENT-VARIABLES
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `RENOR_TELEMETRY_DISABLED` | `false` | `true` switches every remote destination off. |
+| `RENOR_TELEMETRY_DISABLED` | `false` | `true` switches off the older optional remote sink (PostHog, Sentry, Langfuse). It does not turn off anonymous usage numbers: for those use `DO_NOT_TRACK=1`, `RENOR_SHARING=off` or `renor-engine telemetry off`. |
 | `RENOR_SHARING` | unset | `off`, `signals` or `data`. Overrides the recorded choice for this process, and can only lower it: it never turns sharing on, because a choice needs a record of the words the user saw. Any other value stops the command at start. |

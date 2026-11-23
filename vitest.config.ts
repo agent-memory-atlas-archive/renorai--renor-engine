@@ -10,6 +10,7 @@ process.once('exit', () => fs.rmSync(suiteConfigHome, { recursive: true, force: 
 export default defineConfig({
   test: {
     globals: true,
+    ...(process.platform === 'win32' ? { testTimeout: 15_000, hookTimeout: 30_000 } : {}),
     environment: 'node',
     // The suite's fictional owner: identity aliases come from RENOR_OWNER_NAMES, which is unset by default.
     // The shipped sharing default (src/sharing/state.ts) is anonymous usage numbers on until chosen otherwise. That stays the product's

@@ -9,6 +9,7 @@ enableWorkspaceCompileCache();
 import { stopLine } from './stopLine';
 
 import { loadMvpConfig } from './config';
+import { applyShippedToolsDefault } from './contextProfile';
 import { startMvpService, MVP_MCP_PATH } from './server';
 import { flushTelemetry } from './telemetry';
 import { shutdownPosthogMcp } from './posthogMcp';
@@ -32,6 +33,7 @@ import { defaultInForce, effectiveLevel } from '../sharing/state';
  */
 
 async function main() {
+  applyShippedToolsDefault(); // unset RENOR_MCP_TOOLS means the coding set (issue #1222); `all` restores every tool
   const config = loadMvpConfig();
   const mvp = await startMvpService(config);
   console.log(`[mvp] Renor single-owner memory service`);

@@ -211,6 +211,14 @@ export class VertexEmbeddingProvider implements EmbeddingProvider {
   }
 
   /**
+   * A bearer token for another Vertex call made with the same key, so it shares this provider's exchange and renewal
+   * instead of keeping its own (the memory map names its topics with Gemini this way, memorymap/vertexNaming.ts).
+   */
+  bearerToken(signal?: AbortSignal): Promise<string> {
+    return this.getAccessToken(signal);
+  }
+
+  /**
    * The token is renewed at RENEW_AHEAD_SHARE of its life left, whether or not a call is waiting for it, and the renewal
    * arms the next one. A timer that cannot wait that long (setTimeout's limit) wakes early and waits again. The timer is
    * unref'd: it never keeps a process alive. A provider that is no longer used goes on renewing while its process lives,

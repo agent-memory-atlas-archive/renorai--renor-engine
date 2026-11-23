@@ -36,8 +36,10 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY docker/entrypoint.sh /usr/local/bin/renor-entrypoint
 
-# No model, no key and no telemetry unless you configure them. Nothing secret is set here: the owner email and
-# password come from the environment at run time.
+# No model and no key unless you configure them. RENOR_TELEMETRY_DISABLED=true switches off only the older optional
+# remote sink (PostHog/Sentry/Langfuse). It does NOT turn off anonymous usage numbers (src/sharing/), which are on by
+# default with a first-run notice; opt out with DO_NOT_TRACK=1, RENOR_SHARING=off or `renor-engine telemetry off`.
+# Nothing secret is set here: the owner email and password come from the environment at run time.
 ENV NODE_ENV=production \
     RENOR_DATA_DIR=/data \
     MVP_EMBEDDING_PROVIDER=none \

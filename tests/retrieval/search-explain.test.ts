@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach, vi } from 'vitest';
-import fs from 'fs';
+import { removeDb } from '../helpers/removeDb';
 import { retrieveContext } from '../../src/retrieval/orchestrator';
 import { newExplainTrace, explainReply, noteDrop, explainAdvertised, searchExplainEnabled } from '../../src/retrieval/explain';
 import type { RetrievalProbe } from '../../src/retrieval/semantic';
@@ -9,10 +9,16 @@ import { VectorIndex } from '../../src/embeddings/vectorIndex';
 import { tmpPath } from '../helpers/tmpPath';
 
 const DB = tmpPath('test-search-explain.db');
-afterEach(() => { if (fs.existsSync(DB)) fs.unlinkSync(DB); });
+const openDbs: ReturnType<typeof openDb>[] = [];
+afterEach(() => {
+  for (const db of openDbs.splice(0)) db.close();
+  removeDb(DB);
+});
 
 function seed(count: number) {
-  const db = openDb(DB); runMigrations(db);
+  const db = openDb(DB);
+  openDbs.push(db);
+  runMigrations(db);
   const idx = new VectorIndex(db, 4); idx.initTable();
   for (let i = 0; i < count; i++) {
     const path = `/v/Sessions/s${i}.md`;

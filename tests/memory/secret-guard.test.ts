@@ -117,6 +117,21 @@ describe('the daily-note writer', () => {
     for (const f of fragments(key)) expect(err.message).not.toContain(f);
   });
 
+  // Issue 1938: an agent that is refused has to guess which part to reword. The refusal names the part by where it is and
+  // what shape it has, and the shape holds no letter and no digit of it.
+  it('says which part looked like a secret, masked, and how to save the rest', async () => {
+    const vault = mkdir('vault');
+    const text = `token ${key}`;
+    const err = (await appendDailyMemory(vault, '2026-10-03', { text, source: 'claude' }).catch((e: unknown) => e)) as SecretRefusedError;
+    expect(err).toBeInstanceOf(SecretRefusedError);
+    expect(err.message).toMatch(/What looked like it: characters \d+-\d+ \(•/);
+    expect(err.message).toContain('save the rest with that part reworded or left out');
+    expect(err.detail?.masked).not.toMatch(/[\p{L}\p{N}]/u);
+    expect(text.slice(err.detail!.at, err.detail!.at + err.detail!.length)).toContain(key.slice(0, 8)); // it points at the key
+    expect(err.message.length).toBeLessThanOrEqual(400); // the MCP error reply keeps 400 characters
+    for (const f of fragments(key)) expect(err.message).not.toContain(f);
+  });
+
   it('checks the source in the form it is stored: stripping spaces can join the pieces of a key', async () => {
     const vault = mkdir('vault');
     const aws = KEY_SHAPES.aws_id(new Rng(2));

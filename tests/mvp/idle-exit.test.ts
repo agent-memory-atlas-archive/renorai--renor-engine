@@ -297,7 +297,7 @@ describe('on-demand idle exit of a running engine', () => {
     expect(await found.text()).toContain('narwhal observatory');
   }, 60_000);
 
-  it('the CLI exits with status 0 (so Restart=on-failure leaves the unit stopped)', async () => {
+  it.skipIf(HTTP_SERVER_UNSUPPORTED)('the CLI exits with status 0 (so Restart=on-failure leaves the unit stopped)', async () => {
     const env = await tenantEnv();
     const child = spawnTree(TSX, ['src/mvp/cli.ts'], {
       cwd: ENGINE_DIR,

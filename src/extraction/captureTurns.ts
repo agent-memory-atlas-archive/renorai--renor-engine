@@ -1,7 +1,7 @@
 /**
  * The engine's half of server-side end-of-turn capture (POST /internal/capture-turns, reached through the gateway's
- * POST /capture/turns). Off unless the workspace opted in (captureModel.ts: RENOR_CAPTURE_SERVER_OPTIN, RENOR_CAPTURE_KEY_FILE);
- * without it nothing is parsed further and no model call is made.
+ * POST /capture/turns). On when the workspace has a readable RENOR_CAPTURE_KEY_FILE and MVP_INSTANCE_ID; the explicit opt-in (RENOR_CAPTURE_SERVER_OPTIN)
+ * is required only with RENOR_CAPTURE_SERVER=0|off|false (captureModel.ts). Without a config nothing is parsed further and no model call is made.
  *
  * Per request, in order: opt-in check (403 capture_not_enabled) → strict body check (400) → secret screen over every turn
  * (a turn with a secret is dropped whole; a scanner failure answers 503 before anything else) → model and cool-down checks →
@@ -24,8 +24,11 @@ import type Database from '../db/sqlite';
 import { remember, StaleExpectationError } from '../memory/lifecycle';
 import { ruleApprovalsEnabled } from '../mvp/ruleApprovals';
 import { scanSecrets } from './secretScanner';
+import { callNotes, notesMaxUsd, notesUserContent, observationNotesEnabled, priorDigests } from './observationNotes.js';
+import { callLinks, linksMaxUsd, linksUserContent, noteLinksEnabled } from './noteLinks.js';
+import { callEvolve, evolveMaxUsd, evolveNeighborsEnabled, evolveUserContent } from './evolveNeighbors.js';
 import {
-  capturePrice, captureConfigDigest, captureMaxUsd, captureServerConfig, captureUserContent, extractCapture,
+  ANTHROPIC_CAPTURE_PRICE_PER_MILLION, capturePrice, captureConfigDigest, captureMaxUsd, captureServerConfig, captureUserContent, extractCapture,
   type CaptureConfig, type CaptureDiagnostics, type CapturePrice,
 } from './captureModel';
 
@@ -51,13 +54,48 @@ export function verbatimTurnsEnabled(env: NodeJS.ProcessEnv): boolean {
   return /^(1|on|true|yes)$/i.test(env.RENOR_CAPTURE_VERBATIM_TURNS?.trim() ?? '');
 }
 
+/** Research lever, off unless set: capture runs once after a session goes quiet instead of on every turn. */
+export function backgroundReflectEnabled(env: NodeJS.ProcessEnv): boolean {
+  return /^(1|on|true|yes)$/i.test(env.RENOR_CAPTURE_BACKGROUND_REFLECT?.trim() ?? '');
+}
+/** RENOR_CAPTURE_LOW_VALUE_FILTER: parsed like the other capture levers; unset or anything else is off. */
+export function lowValueFilterEnabled(env: NodeJS.ProcessEnv): boolean {
+  return /^(1|on|true|yes)$/i.test(env.RENOR_CAPTURE_LOW_VALUE_FILTER?.trim() ?? '');
+}
+
+const LOW_VALUE_TURN = /^(hi|hello|hey|thanks|thank you|thx|ok|okay|k|got it|cool|great|nice|perfect|sounds good|will do|lgtm|bye|good morning|good night)( (there|again|so much|a lot|you|all))?[\s.!?,]*$/i;
+
+/**
+ * RENOR_CAPTURE_LOW_VALUE_FILTER: drops greetings, bare acknowledgements and repeated turns (rule-based, no model call).
+ * Any turn that is not exactly one of those short phrases is kept (a bare yes/no stays: it can answer a question). It runs before the verbatim-excerpt lever, so filler is not saved as an excerpt.
+ */
+export function dropLowValueTurns<T extends { text: string; role?: string }>(messages: readonly T[]): { kept: T[]; dropped: number } {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+  for (const message of messages) {
+    const text = message.text.trim().replace(/\s+/g, ' ').toLowerCase();
+    const key = `${message.role ?? ''}:${text}`;
+    if (LOW_VALUE_TURN.test(text) || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(message);
+  }
+  return { kept, dropped: messages.length - kept.length };
+}
+
+/** RENOR_CAPTURE_BACKGROUND_REFLECT: a session with no new turn for this long is captured in one model call. */
+export const REFLECT_IDLE_MS = 300_000;
+
 export interface CaptureTurnsDeps {
   env: NodeJS.ProcessEnv;
+  /** Test seam for the idle wait of the background-reflection lever. */
+  reflectIdleMs?: number;
   /** Where the per-tenant daily total and the per-call ledger live (the auth state directory, never the memory directory). */
   stateDir: string;
   saveNote(text: string, date: string): Promise<void>;
   /** Resolves true when the rule was written as a new pending fact, false when its topic already had a current fact. */
   saveRule(topic: string, text: string): Promise<boolean>;
+  /** Research levers RENOR_CAPTURE_EVOLVE_NEIGHBORS, RENOR_CAPTURE_NOTE_LINKS and RENOR_OBSERVATION_NOTES only: the texts of existing notes closest to the new facts. */
+  findNeighbors?(texts: string[]): Promise<string[]>;
   fetchImpl?: typeof fetch;
   now?: () => number;
   log?: (line: string) => void;
@@ -225,7 +263,37 @@ export function createCaptureTurns(deps: CaptureTurnsDeps): (body: unknown) => P
     if (recent.length > DEDUPE_WINDOW) recent.shift();
   };
 
-  return async function handle(body: unknown): Promise<CaptureTurnsAnswer> {
+  /** Background-reflection lever: screened turns held per session until the session goes idle. */
+  const sessions = new Map<string, { messages: Delta['messages']; timer: ReturnType<typeof setTimeout> }>();
+  const idleMs = deps.reflectIdleMs ?? REFLECT_IDLE_MS;
+
+  const flush = (session: string): void => {
+    const held = sessions.get(session);
+    if (!held) return;
+    sessions.delete(session);
+    clearTimeout(held.timer);
+    // Same caps, cool-down and spend ledger as a live call; the answer has no reader, failures are logged by `finish`.
+    void extractAndSave(held.messages, 0, captureServerConfig(deps.env)).catch(() => { /* logged inside */ });
+  };
+
+  const hold = (session: string, messages: Delta['messages']): void => {
+    const before = sessions.get(session);
+    if (before) clearTimeout(before.timer);
+    let kept = [...(before?.messages ?? []), ...messages];
+    // Bounded like one live call: the newest messages that fit.
+    let chars = 0;
+    let from = kept.length;
+    while (from > 0 && kept.length - from < MAX_MESSAGES && chars + kept[from - 1].text.length <= MAX_DELTA_CHARS) {
+      chars += kept[from - 1].text.length;
+      from--;
+    }
+    kept = kept.slice(from);
+    const timer = setTimeout(() => flush(session), idleMs);
+    timer.unref?.();
+    sessions.set(session, { messages: kept, timer });
+  };
+
+  async function extractAndSave(messages: Delta['messages'], verbatimSaved: number, cfg: CaptureConfig | null): Promise<CaptureTurnsAnswer> {
     const diagnostics: CaptureDiagnostics = { stop_reason: null, parsed: false, output_tokens: null };
     const finish = (answer: CaptureTurnsAnswer): CaptureTurnsAnswer => {
       if (answer.status >= 400) log(`[capture] failure ${JSON.stringify({
@@ -234,40 +302,7 @@ export function createCaptureTurns(deps: CaptureTurnsDeps): (body: unknown) => P
       return answer;
     };
     try {
-      const cfg: CaptureConfig | null = captureServerConfig(deps.env);
       if (!cfg) return finish({ status: 403, body: { error: 'capture_not_enabled' } });
-      const delta = parseDelta(body);
-      if (!delta) return finish({ status: 400, body: { error: 'invalid_body' } });
-
-      // Screened before any spend, log or provider call. Only the count of turns held back is logged, never their text.
-      let screened: { kept: Delta['messages']; dropped: number };
-      try {
-        screened = screenTurns(delta.messages);
-      } catch {
-        return finish({ status: 503, body: { error: 'scanner_unavailable' } });
-      }
-      if (screened.dropped > 0) log(`[capture] ${screened.dropped} turn(s) held back by the secret scanner: not sent`);
-      if (screened.kept.length === 0) log('[capture] save_path {"reason":"all_turns_screened","saved":0,"pending_rules":0}');
-      if (screened.kept.length === 0) return finish({ status: 200, body: { ok: true, saved: 0, pending_rules: 0 } });
-      const messages = screened.kept;
-
-      // Lever (default off, no model call): a bounded verbatim excerpt of each screened user turn, saved as a dated note.
-      let verbatimSaved = 0;
-      if (verbatimTurnsEnabled(deps.env)) {
-        const verbatimDay = new Date(now()).toISOString().slice(0, 10);
-        for (const message of messages) {
-          if (message.role !== 'user') continue;
-          const excerpt = message.text.trim().slice(0, VERBATIM_EXCERPT_CHARS);
-          const key = normalise(excerpt);
-          if (!key || isDuplicate(key)) continue;
-          if (scanSecrets(excerpt) !== null) continue;
-          try {
-            await deps.saveNote(`User said: ${excerpt}`, verbatimDay);
-            remembered(key);
-            verbatimSaved++;
-          } catch { /* a failed excerpt write never blocks the model capture */ }
-        }
-      }
 
       const price: CapturePrice | undefined = capturePrice(cfg);
       if (!price) return finish({ status: 503, body: { error: 'model_price_unknown' } });
@@ -325,6 +360,7 @@ export function createCaptureTurns(deps: CaptureTurnsDeps): (body: unknown) => P
       }
 
       let saved = 0;
+      const savedTexts: string[] = [];
       const counts = { empty: 0, duplicate: 0, secret: 0, note_write_failed: 0, rule_write_failed: 0, rule_not_saved: 0, rules_disabled: 0 };
       for (const observation of result.observations) {
         const key = normalise(observation.text);
@@ -336,7 +372,71 @@ export function createCaptureTurns(deps: CaptureTurnsDeps): (body: unknown) => P
           await deps.saveNote(observation.text, observation.date);
           remembered(key);
           saved++;
+          savedTexts.push(observation.text);
         } catch { counts.note_write_failed++; }
+      }
+
+      // Research lever (default off): one more call restates existing notes the new facts made stale, as new dated notes.
+      if (evolveNeighborsEnabled(deps.env) && deps.findNeighbors && !cfg.ownHwUrl && savedTexts.length > 0) {
+        try {
+          const neighbors = (await deps.findNeighbors(savedTexts)).filter(t => !savedTexts.includes(t));
+          if (neighbors.length > 0) {
+            const content = evolveUserContent(savedTexts, neighbors);
+            const evolveReserve = evolveMaxUsd(content, price);
+            if (reserveSpend(spendFile, day, evolveReserve, cfg.maxUsdDay) === 'admitted') {
+              const evolved = await callEvolve(content, Math.min(neighbors.length, 6), cfg, deps.fetchImpl);
+              const p = ANTHROPIC_CAPTURE_PRICE_PER_MILLION[cfg.model];
+              const charged = evolved && p && evolved.inTokens !== null && evolved.outTokens !== null
+                ? (evolved.inTokens * p.input + evolved.outTokens * p.output) / 1e6 : evolveReserve;
+              settleSpend(spendFile, day, evolveReserve, Math.min(charged, evolveReserve));
+              appendCall(callsFile, { event: 'evolve', ok: evolved ? 1 : 0, usd_est: charged, updates: evolved?.updates.length ?? 0 });
+              for (const text of evolved?.updates ?? []) {
+                if (scanSecrets(text) !== null) continue;
+                try { await deps.saveNote(text, day); } catch { /* an update that fails to write never fails the capture */ }
+              }
+            }
+          }
+        } catch { /* the lever never fails a capture */ }
+      }
+
+      // Research lever (default off): one more call writes keywords, a context line and links to close notes, as one new note.
+      if (noteLinksEnabled(deps.env) && deps.findNeighbors && !cfg.ownHwUrl && savedTexts.length > 0) {
+        try {
+          const neighbors = (await deps.findNeighbors(savedTexts)).filter(t => !savedTexts.includes(t)).slice(0, 6);
+          const content = linksUserContent(savedTexts, neighbors);
+          const linksReserve = linksMaxUsd(content, price);
+          if (reserveSpend(spendFile, day, linksReserve, cfg.maxUsdDay) === 'admitted') {
+            const linked = await callLinks(content, neighbors, cfg, deps.fetchImpl);
+            const p = ANTHROPIC_CAPTURE_PRICE_PER_MILLION[cfg.model];
+            const charged = linked && p && linked.inTokens !== null && linked.outTokens !== null
+              ? (linked.inTokens * p.input + linked.outTokens * p.output) / 1e6 : linksReserve;
+            settleSpend(spendFile, day, linksReserve, Math.min(charged, linksReserve));
+            appendCall(callsFile, { event: 'note_links', ok: linked ? 1 : 0, usd_est: charged });
+            if (linked && scanSecrets(linked.note) === null) {
+              try { await deps.saveNote(linked.note, day); } catch { /* a links note that fails to write never fails the capture */ }
+            }
+          }
+        } catch { /* the lever never fails a capture */ }
+      }
+
+      // Research lever (default off): one more call folds the new facts and earlier digests into one running-notes note.
+      if (observationNotesEnabled(deps.env) && deps.findNeighbors && !cfg.ownHwUrl && savedTexts.length > 0) {
+        try {
+          const prior = priorDigests((await deps.findNeighbors(savedTexts)).filter(t => !savedTexts.includes(t)));
+          const content = notesUserContent(savedTexts, prior);
+          const notesReserve = notesMaxUsd(content, price);
+          if (reserveSpend(spendFile, day, notesReserve, cfg.maxUsdDay) === 'admitted') {
+            const noted = await callNotes(content, cfg, deps.fetchImpl);
+            const p = ANTHROPIC_CAPTURE_PRICE_PER_MILLION[cfg.model];
+            const charged = noted && p && noted.inTokens !== null && noted.outTokens !== null
+              ? (noted.inTokens * p.input + noted.outTokens * p.output) / 1e6 : notesReserve;
+            settleSpend(spendFile, day, notesReserve, Math.min(charged, notesReserve));
+            appendCall(callsFile, { event: 'observation_notes', ok: noted ? 1 : 0, usd_est: charged });
+            if (noted && scanSecrets(noted.note) === null) {
+              try { await deps.saveNote(noted.note, day); } catch { /* a notes note that fails to write never fails the capture */ }
+            }
+          }
+        } catch { /* the lever never fails a capture */ }
       }
 
       let pending = 0;
@@ -362,6 +462,63 @@ export function createCaptureTurns(deps: CaptureTurnsDeps): (body: unknown) => P
       return finish({ status: 200, body: { ok: true, saved: saved + verbatimSaved, pending_rules: pending } });
     } catch {
       return finish({ status: 500, body: { error: 'capture_failed' } });
+    }
+  }
+
+  const early = (answer: CaptureTurnsAnswer): CaptureTurnsAnswer => {
+    if (answer.status >= 400) log(`[capture] failure ${JSON.stringify({ error: answer.body.error, stop_reason: null, parsed: false, output_tokens: null, upstream: undefined })}`);
+    return answer;
+  };
+
+  return async function handle(body: unknown): Promise<CaptureTurnsAnswer> {
+    try {
+      const cfg: CaptureConfig | null = captureServerConfig(deps.env);
+      if (!cfg) return { status: 403, body: { error: 'capture_not_enabled' } };
+      const delta = parseDelta(body);
+      if (!delta) return { status: 400, body: { error: 'invalid_body' } };
+      // Screened before any spend, log or provider call. Only the count of turns held back is logged, never their text.
+      let screened: { kept: Delta['messages']; dropped: number };
+      try {
+        screened = screenTurns(delta.messages);
+      } catch {
+        return early({ status: 503, body: { error: 'scanner_unavailable' } });
+      }
+      if (screened.dropped > 0) log(`[capture] ${screened.dropped} turn(s) held back by the secret scanner: not sent`);
+      if (screened.kept.length === 0) log('[capture] save_path {"reason":"all_turns_screened","saved":0,"pending_rules":0}');
+      if (screened.kept.length === 0) return early({ status: 200, body: { ok: true, saved: 0, pending_rules: 0 } });
+      let messages = screened.kept;
+      if (lowValueFilterEnabled(deps.env)) {
+        const filtered = dropLowValueTurns(messages);
+        if (filtered.dropped > 0) log(`[capture] ${filtered.dropped} low-value turn(s) dropped by the filter`);
+        if (filtered.kept.length === 0) return early({ status: 200, body: { ok: true, saved: 0, pending_rules: 0 } });
+        messages = filtered.kept;
+      }
+
+      // Lever (default off, no model call): a bounded verbatim excerpt of each screened user turn, saved as a dated note.
+      let verbatimSaved = 0;
+      if (verbatimTurnsEnabled(deps.env)) {
+        const verbatimDay = new Date(now()).toISOString().slice(0, 10);
+        for (const message of messages) {
+          if (message.role !== 'user') continue;
+          const excerpt = message.text.trim().slice(0, VERBATIM_EXCERPT_CHARS);
+          const key = normalise(excerpt);
+          if (!key || isDuplicate(key)) continue;
+          if (scanSecrets(excerpt) !== null) continue;
+          try {
+            await deps.saveNote(`User said: ${excerpt}`, verbatimDay);
+            remembered(key);
+            verbatimSaved++;
+          } catch { /* a failed excerpt write never blocks the model capture */ }
+        }
+      }
+
+      if (backgroundReflectEnabled(deps.env)) {
+        hold(delta.session, messages);
+        return { status: 200, body: { ok: true, saved: verbatimSaved, pending_rules: 0 } };
+      }
+      return await extractAndSave(messages, verbatimSaved, cfg);
+    } catch {
+      return early({ status: 500, body: { error: 'capture_failed' } });
     }
   };
 }

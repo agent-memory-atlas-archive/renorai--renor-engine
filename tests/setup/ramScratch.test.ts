@@ -46,9 +46,13 @@ function machine(over: Machine = {}): Probes {
   };
 }
 
+const slashes = (file: string) => file.split(path.sep).join('/');
+const dirLinkType = process.platform === 'win32' ? 'junction' : 'dir';
+
 describe('planScratch: when a run moves to RAM', () => {
   it('moves when its temp directory is on a disk and /dev/shm is a roomy tmpfs', () => {
-    expect(planScratch(machine())).toEqual({ move: true, base: '/dev/shm/renor-vitest-1000' });
+    const plan = planScratch(machine());
+    expect(plan.move && slashes(plan.base)).toBe('/dev/shm/renor-vitest-1000');
     expect(planScratch(machine({ tmpFs: EXT4 }))).toMatchObject({ move: true });
   });
 
@@ -108,7 +112,7 @@ describe('planScratch: when a run moves to RAM', () => {
         },
       }),
     );
-    expect(asked).toEqual(['/dev/shm/renor-vitest-1000']);
+    expect(asked.map(slashes)).toEqual(['/dev/shm/renor-vitest-1000']);
   });
 
   it('does not move when the mount table cannot be read, since it cannot say whether scripts can run there', () => {
@@ -122,12 +126,12 @@ describe('shared-memory symlinks', () => {
     const target = path.join(home, 'run-shm');
     const link = path.join(home, 'dev-shm');
     fs.mkdirSync(target);
-    fs.symlinkSync(target, link);
-    const mounts = `root / ext4 rw 0 0\nshm ${fs.realpathSync(target)} tmpfs rw,noexec 0 0\n`;
+    fs.symlinkSync(target, link, dirLinkType);
+    const mounts = `root / ext4 rw 0 0\nshm ${slashes(fs.realpathSync(target)).replaceAll(' ', '\\040')} tmpfs rw,noexec 0 0\n`;
     const real = realProbes(link);
     const p = machine({
       shm: real.shm,
-      mountOptions: (dir) => mountOptionsIn(mounts, dir),
+      mountOptions: (dir) => mountOptionsIn(mounts, slashes(dir)),
     });
     expect(planScratch(p)).toEqual({ move: false, reason: 'shm-noexec' });
   });
@@ -183,12 +187,15 @@ describe('applyScratchPlan: the move itself', () => {
     const { shm, home, env, probes } = withShm();
     const dir = applyScratchPlan(probes)!;
     expect(dir).toBeDefined();
-    expect(path.dirname(dir)).toBe(path.join(shm, `renor-vitest-${process.getuid?.()}`));
+    expect(path.dirname(dir)).toBe(path.join(shm, `renor-vitest-${process.getuid?.() ?? 'user'}`));
     expect(path.basename(dir)).toMatch(new RegExp(`^run-${process.pid}-`));
     expect([env.TMPDIR, env.TMP, env.TEMP]).toEqual([dir, dir, dir]);
     expect(env[MOVED_FROM_VAR]).toBe(home);
-    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
-    expect(fs.statSync(path.dirname(dir)).mode & 0o777).toBe(0o700);
+    for (const folder of [dir, path.dirname(dir)]) {
+      const stats = fs.statSync(folder);
+      expect(stats.isDirectory()).toBe(true);
+      if (process.platform !== 'win32') expect(stats.mode & 0o777).toBe(0o700);
+    }
     expect(fs.readFileSync(path.join(dir, '.owner'), 'utf8')).toBe(`${process.pid} ${startTicks(process.pid)}\n`);
   });
 
@@ -207,7 +214,7 @@ describe('applyScratchPlan: the move itself', () => {
   it('leaves the environment alone when the base is not a directory (a link someone planted in the shared /dev/shm)', () => {
     const { shm, home, env, probes } = withShm();
     const target = tmp('ram-scratch-elsewhere-');
-    fs.symlinkSync(target, path.join(shm, `renor-vitest-${process.getuid?.()}`));
+    fs.symlinkSync(target, path.join(shm, `renor-vitest-${process.getuid?.() ?? 'user'}`), dirLinkType);
     expect(applyScratchPlan(probes)).toBeUndefined();
     expect(env).toEqual({ TMPDIR: home, TMP: home, TEMP: home });
     expect(fs.readdirSync(target)).toEqual([]);
@@ -301,7 +308,7 @@ describe('useRealTmpdir: the temp directory by its real path', () => {
   const linked = () => {
     const home = tmp('real-tmpdir-');
     fs.mkdirSync(path.join(home, 'real', 'T'), { recursive: true });
-    fs.symlinkSync('real', path.join(home, 'link'));
+    fs.symlinkSync(process.platform === 'win32' ? path.join(home, 'real') : 'real', path.join(home, 'link'), dirLinkType);
     return { real: fs.realpathSync(path.join(home, 'real')), link: path.join(home, 'link') };
   };
 

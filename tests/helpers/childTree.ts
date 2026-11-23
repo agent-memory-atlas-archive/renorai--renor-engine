@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess, type ExecFileOptions, type SpawnOptions } from 'child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess, type ExecFileOptions, type SpawnOptions } from 'child_process';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -288,10 +288,22 @@ export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'
   let signalled = false;
   if (leaderUnreaped || (id !== undefined && ownMembers(pgid, id, membersByPgid()).length > 0)) {
     try {
-      process.kill(-pgid, signal);
-      signalled = true;
+      if (process.platform === 'win32') {
+        // Windows does not accept a negative PID. Kill the tracked child and its whole tree
+        // (taskkill /T) while it is still ours; fall back to the child alone.
+        if (leaderUnreaped) {
+          if (signal === 'SIGKILL' && child.pid !== undefined) {
+            const r = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+            signalled = r.status === 0;
+          }
+          if (!signalled) signalled = child.kill(signal);
+        }
+      } else {
+        process.kill(-pgid, signal);
+        signalled = true;
+      }
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ESRCH' && leaderUnreaped) {
+      if (process.platform !== 'win32' && (err as NodeJS.ErrnoException).code !== 'ESRCH' && leaderUnreaped) {
         try {
           signalled = child.kill(signal);
         } catch {

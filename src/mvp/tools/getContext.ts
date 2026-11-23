@@ -7,6 +7,8 @@ import { identityLine } from '../identity.js';
 import { contextItems } from '../readUsefulness.js';
 import { observeEnabled } from '../observations.js';
 import { applyAnswerCheck } from '../answerCheck.js';
+import { applyCitationLock, citationLockEnabled } from '../citationLock.js';
+import { ledgerNoteMatcher } from '../../retrieval/ledgerPresentation.js';
 import { workspaceIsEmpty, EMPTY_WORKSPACE_NOTE } from '../../memory/whatsNew.js';
 import { callOrigin, headerText, toolError } from './shared.js';
 import type { ToolContext } from './setup.js';
@@ -46,7 +48,9 @@ export function registerGetContextTool(ctx: ToolContext): void {
         // Which Renor answered: inside max_tokens with the rest of the trailer.
         trailer: () => ({ ...indexNotice(db, semantic, config, args.scope), renor: identityLine(extra?.requestInfo?.headers) }),
       });
-      const checked = await applyAnswerCheck(body as unknown as Record<string, unknown>, args.query, answerChecker, (body as { maxTokens?: number }).maxTokens);
+      const answered = await applyAnswerCheck(body as unknown as Record<string, unknown>, args.query, answerChecker, (body as { maxTokens?: number }).maxTokens);
+      // RENOR_ANSWER_CITATION_LOCK (off by default, issue #2075): only memories the reader can open stay. Unset leaves the reply byte for byte.
+      const checked = citationLockEnabled() ? applyCitationLock(answered, config.memoryDir, ledgerNoteMatcher(config)) : answered;
       usefulness.measure('get_context', () => contextItems(checked));
       const hasObservations = observeEnabled() && Array.isArray(checked.memories) && checked.memories.some(memory => memory?.source === 'observation');
       const withNotice = workspaceIsEmpty(db) && !hasObservations ? { ...checked, notice: [checked.notice, EMPTY_WORKSPACE_NOTE].filter(Boolean).join(' ') } : checked;
