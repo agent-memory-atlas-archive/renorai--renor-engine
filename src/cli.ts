@@ -582,7 +582,6 @@ if (backupEnabled()) {
     .command("backup")
     .description("Archive the memory folder (Markdown notes and the ledger, not the index) with a checksum manifest")
     .option("--out <file>", "archive to write (default: renor-backup-<date>.tar.gz)")
-    .addHelpText("after", "\nExample (restore into an empty folder):\n  renor-engine backup --out backup.tar.gz\n  renor-engine restore backup.tar.gz --to ./restored")
     .action((opts: { out?: string }) => {
       try {
         const r = createBackup(loadConfig().vaultPath, opts.out ?? defaultBackupName());
